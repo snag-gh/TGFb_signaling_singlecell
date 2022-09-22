@@ -1,0 +1,240 @@
+---
+title: "Colon macrophages trajectory analysis"
+author: "Sushma Nagaraj"
+date: "6/14/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+suppressPackageStartupMessages({
+  library(slingshot); library(tradeSeq)
+  library(SingleCellExperiment)
+  library(scater); library(scran)
+  library(RColorBrewer)
+  library(fgsea); library(msigdbr)
+  #library(scales)
+  library(UpSetR)
+  library(knitr)
+  library(ggplot2); library(ComplexHeatmap); library(circlize)
+  library(gridExtra)
+})
+here::i_am("src/TGFb_signaling/Tsk_colon/Colon_macrophages_trajectory_analysis.Rmd")
+dir <- "Tsk_colon/Macrophage_analysis"
+
+```
+
+```{r}
+sce <- readRDS(here::here(dir, "macrophages.filtered.rds"))
+```
+
+```{r}
+plotReducedDim(sce, "corrected", ncomponents = c(1,2), colour_by = "cluster.mac.k10")
+plotReducedDim(sce, "corrected", ncomponents = c(2,3), colour_by = "cluster.mac.k10")
+
+plotUMAP(sce, colour_by = "cluster.mac.k10", text_by = "cluster.mac.k10", point_size = 0.5, point_alpha = 0.4)
+```
+
+```{r}
+keep.genes <- nexprs(sce, byrow = TRUE)
+sce <- sce[keep.genes > 10, ]
+```
+
+```{r}
+scores <- imbalance_score(
+  rd = reducedDims(sce)$UMAP, 
+  cl = sce$genotype,
+  k = 20, smooth = 40)
+```
+
+```{r}
+sce <- slingshot(sce, reducedDim = 'UMAP', clusterLabels = sce$cluster.mac.k10)
+lapply(c("slingPseudotime_1", "slingPseudotime_2", "slingPseudotime_3", "slingPseudotime_4", "slingPseudotime_5", "slingPseudotime_6"), function(x) {
+  plotUMAP(sce, colour_by = x, point_size = 0.5, point_alpha = 0.4)
+})
+
+sce.copy <- sce
+colData(sce.copy) <- colData(sce.copy)[,-c(42:48)]
+sce.copy <- sce.copy[,sce.copy$cluster.mac.k10 %in% c(4,7,8,9,10,11)]
+sce.copy <- slingshot(sce.copy, reducedDim = "UMAP", clusterLabels = sce.copy$cluster.mac.k10)
+lapply(c("slingPseudotime_1", "slingPseudotime_2", "slingPseudotime_3"), function(x) {
+  plotUMAP(sce.copy, colour_by = x, point_size = 0.5, point_alpha = 0.4)
+})
+
+pseudopaths <- slingPseudotime(sce.copy)
+shared.pseudo <- rowMeans(pseudopaths, na.rm=TRUE)
+gg <- plotUMAP(sce.copy, colour_by = I(shared.pseudo))
+
+embedded <- embedCurves(sce.copy, 'UMAP')
+embedded <- slingCurves(embedded)
+for (path in embedded) {
+    embedded1 <- data.frame(path$s[path$ord,])
+    gg <- gg + geom_path(data=embedded1, aes(x=Dim.1, y=Dim.2), size=1.2)
+}
+
+pdf(here::here(dir, "trajectory_analysis", "slingshot.trajectories.umap.pdf"))
+print(gg)
+dev.off()
+```
+
+
+```{r}
+ggplot(as.data.frame(colData(sce.copy)), aes(x = slingPseudotime_1, fill = genotype)) + geom_density(alpha = .5) + theme_minimal() + scale_fill_brewer(type = "qual")
+ggplot(as.data.frame(colData(sce.copy)), aes(x = slingPseudotime_2, fill = genotype)) + geom_density(alpha = .5) + theme_minimal() + scale_fill_brewer(type = "qual")
+ggplot(as.data.frame(colData(sce.copy)), aes(x = slingPseudotime_3, fill = genotype)) + geom_density(alpha = .5) + theme_minimal() + scale_fill_brewer(type = "qual")
+```
+
+```{r}
+ks.test(slingPseudotime(sce.copy)[sce.copy$genotype == "heterozygous", 1], slingPseudotime(sce.copy)[sce.copy$genotype == "Wildtype", 1])
+ks.test(slingPseudotime(sce.copy)[sce.copy$genotype == "heterozygous", 2], slingPseudotime(sce.copy)[sce.copy$genotype == "Wildtype", 2])
+ks.test(slingPseudotime(sce.copy)[sce.copy$genotype == "heterozygous", 3], slingPseudotime(sce.copy)[sce.copy$genotype == "Wildtype", 3])
+```
+
+```{r}
+saveRDS(sce.copy, here::here(dir, "sce.slingshot.rds"))
+#Run fitGam.R for each trajectory.
+#sds <- SlingshotDataSet(sce.copy)
+scw <- slingCurveWeights(sce.copy)
+#sce.traj2 <- sce.copy[,scw[,2] >= 0.6]
+#counts <- as.matrix(counts(sce.traj2))
+#ps <- as.matrix(sce.traj2$slingPseudotime_2)
+#cw <- matrix(data = 1, nrow = ncol(sce.traj2), ncol = 1)
+
+#set.seed(3)
+#sce.traj2.tradeSeq <- fitGAM(counts = counts, pseudotime = ps, cellWeights = cw, conditions = factor(sce.traj2$genotype), nknots = 5, verbose = TRUE, parallel = FALSE) #conditions does not work with sparse matrix.
+```
+
+```{r}
+cur <- "traj1"
+#cur <- "traj2"
+#cur <- "traj3"
+sce.traj <- readRDS(here::here(dir, "trajectory_analysis", paste0("sce.", cur, ".tradeSeq.rds")))
+mean(rowData(sce.traj)$tradeSeq$converged)
+rowData(sce.traj)$assocRes <- associationTest(sce.traj, lineages = TRUE, l2fc = log2(2))
+saveRDS(sce.traj, here::here(dir, "trajectory_analysis", paste0("sce.", cur, ".tradeSeq.rds")))
+
+assocRes <- rowData(sce.traj)$assocRes
+assocRes$FDR_lineage1_conditionheterozygous <- p.adjust(assocRes$pvalue_lineage1_conditionheterozygous)
+assocRes$FDR_lineage1_conditionWildtype <- p.adjust(assocRes$pvalue_lineage1_conditionWildtype)
+siggenes.het <- assocRes[which(assocRes$FDR_lineage1_conditionheterozygous <= 0.01), ]
+siggenes.het <- siggenes.het[order(siggenes.het$meanLogFC, decreasing = TRUE), ]
+write.csv(siggenes.het, file = here::here(dir, "trajectory_analysis", cur, "Het.Association_test_results.FDR0.01.csv"))
+
+siggenes.wt <- assocRes[which(assocRes$FDR_lineage1_conditionWildtype <= 0.01), ]
+siggenes.wt <- siggenes.wt[order(siggenes.wt$meanLogFC, decreasing = TRUE), ]
+write.csv(siggenes.wt, file = here::here(dir, "trajectory_analysis", cur, "Wt.Association_test_results.FDR0.01.csv"))
+
+pdf(here::here(dir, "trajectory_analysis", cur, "upset_plot.pdf"))
+UpSetR::upset(fromList(list(Heterozygous = rownames(siggenes.het), Wildtype = rownames(siggenes.wt))))
+dev.off()
+
+plotSmoothers(sce.traj, assays(sce.traj)$counts, gene = "Retnla", alpha = 1, border = TRUE) +ggtitle("Retnla")
+plotSmoothers(sce.traj, assays(sce.traj)$counts, gene = "Chil3", alpha = 1, border = TRUE) + ggtitle("Chil3")
+plotSmoothers(sce.traj, assays(sce.traj)$counts, gene = "Lyz1", alpha = 1, border = TRUE) + ggtitle("Lyz1")
+plotSmoothers(sce.traj, assays(sce.traj)$counts, gene = "Plac8", alpha = 1, border = TRUE) + ggtitle("Plac8")
+plotSmoothers(sce.traj, assays(sce.traj)$counts, gene = "Ly6c2", alpha = 1, border = TRUE) + ggtitle("Ly6c2")
+plotSmoothers(sce.traj, assays(sce.traj)$counts, gene = "Pcdha1", alpha = 1, border = TRUE) + ggtitle("Pcdha1")
+
+plotSmoothers(sce.traj, assays(sce.traj)$counts, gene = "Snca", alpha = 1, border = TRUE) + ggtitle("Snca")
+```
+
+#Heatmap of top genes associated with the trajectory.
+```{r}
+#gt <- "Het"
+gt <- "Wt"
+siggenes <- read.csv(here::here(dir, "trajectory_analysis", cur, paste0(gt, ".Association_test_results.FDR0.01.csv")), header = TRUE, row.names = 1)
+topgenes <- rownames(siggenes)[1:250]
+
+#sce.sub <- sce.copy[,scw[,1] >= 0.6]
+#sce.sub <- sce.copy[,scw[,2] >= 0.6]
+sce.sub <- sce.copy[,scw[,3] >= 0.6]
+sce.sub$cluster.mac.k10 <- droplevels(sce.sub$cluster.mac.k10)
+nexpr <- nexprs(sce.sub, byrow = TRUE)
+nexpr <- nexpr[names(nexpr) %in% topgenes]
+table(nexpr >= 10)
+
+#mat <- logcounts(sce.sub)[rownames(sce.sub) %in% topgenes, order(sce.sub$slingPseudotime_1)]
+#mat <- logcounts(sce.sub)[rownames(sce.sub) %in% topgenes, order(sce.sub$slingPseudotime_2)]
+mat <- logcounts(sce.sub)[rownames(sce.sub) %in% topgenes, order(sce.sub$slingPseudotime_3)]
+mat <- as.matrix(mat)
+mat.scale <- t(scale(t(mat)))
+all(names(nexpr) == rownames(mat.scale))
+mat.scale <- mat.scale[which(nexpr >= 10), ]
+
+col <- brewer.pal(n = 8, "Set1")
+col.cluster <- col[1:6]
+names(col.cluster) <- levels(sce.sub$cluster.mac.k10)
+set.seed(110011)
+#column_ha <- HeatmapAnnotation(pseudotime = sce.sub$slingPseudotime_1[order(sce.sub$slingPseudotime_1)], clusters = sce.sub$cluster.mac.k10[order(sce.sub$slingPseudotime_1)])
+#column_ha <- HeatmapAnnotation(pseudotime = sce.sub$slingPseudotime_2[order(sce.sub$slingPseudotime_2)], clusters = sce.sub$cluster.mac.k10[order(sce.sub$slingPseudotime_2)], genotype = sce.sub$genotype[order(sce.sub$slingPseudotime_2)])
+column_ha <- HeatmapAnnotation(pseudotime = sce.sub$slingPseudotime_3[order(sce.sub$slingPseudotime_3)], clusters = sce.sub$cluster.mac.k10[order(sce.sub$slingPseudotime_3)], genotype = sce.sub$genotype[order(sce.sub$slingPseudotime_3)], col = list(clusters = col.cluster))
+
+
+pdf(here::here(dir, "trajectory_analysis", cur, paste0(gt, ".genes_differentially_expressed_along_pseudotime.complexHeatmap.pdf")), height = 10)
+Heatmap(mat.scale, column_title = "Trajectory 3", col = colorRamp2(c(-2, 0, 3), c("blue", "white", "red")), cluster_columns = FALSE, show_column_names = FALSE, row_names_gp = gpar(fontsize = 5), top_annotation = column_ha, clustering_distance_rows = "pearson", clustering_method_rows = "ward.D2", show_row_dend = FALSE)
+dev.off()
+
+
+```
+#Genes varying along Pseudotime in Hets and Wildtype samples.
+```{r}
+geneSets = msigdbr(species = "mouse", category = "H") #Hallmark genesets
+#geneSets = msigdbr(species = "mouse", category = "C2", subcategory = "CP:KEGG") #Kegg genesets
+geneSets = msigdbr(species = "mouse", category = "C5", subcategory = "BP") 
+#geneSets = msigdbr(species = "mouse", category = "C7", subcategory = "IMMUNESIGDB") 
+m_list <- geneSets %>% split(x = .$gene_symbol, f = .$gs_name)
+
+#stats <- assocRes$waldStat_lineage1_conditionheterozygous
+#names(stats) <- rownames(assocRes)
+#stats <- stats[!is.na(stats)]
+#HetRes <- fgsea::fgsea(pathways = m_list, stats = stats, minSize = 10, nPermSimple = 10000)
+#oHetRes <- order(HetRes$pval, decreasing = FALSE)
+#HetRes[oHetRes,]
+library(data.table)
+#fwrite(HetRes[oHetRes, ], file=here::here(dir, "trajectory_analysis", cur, paste0("Genes_varying_along_pseudotime.fgsea_analysis.hallmark_pathways.Het.txt")), sep="\t", sep2=c("", " ", ""))
+
+stats <- assocRes$waldStat_lineage1_conditionWildtype
+names(stats) <- rownames(assocRes)
+stats <- stats[!is.na(stats)]
+WtRes <- fgsea(pathways = m_list, stats = stats, nPermSimple = 10000)
+oWtRes <- order(WtRes$pval, decreasing = FALSE)
+WtRes <- WtRes[oWtRes,]
+WtRes <- WtRes[WtRes$padj < 0.05, ]
+fwrite(WtRes, file=here::here(dir, "trajectory_analysis", cur, paste0("Genes_varying_along_pseudotime.fgsea_analysis.C5_BP.Wt.txt")), sep="\t", sep2=c("", " ", ""))
+```
+
+
+```{r}
+condRes <- conditionTest(sce.traj, l2fc = log2(2))
+condRes$padj <- p.adjust(condRes$pvalue, "fdr")
+sum(condRes$padj <= 0.05, na.rm = TRUE)
+condRes[which(condRes$padj <= 0.05), ]
+condRes <- condRes[order(condRes$pvalue), ]
+write.csv(condRes, file = here::here(dir, "trajectory_analysis", cur, "Condition_test_results.FDR0.05.LFC1.csv"))
+
+genes <- rownames(condRes[which(condRes$padj <= 0.05), ])
+pdf(here::here(dir, "trajectory_analysis", cur, "genes_different_between_conditions.pdf"))
+#plotSmoothers(sce.traj, assays(sce.traj)$counts, gene = "Lpl", alpha = 1, border = TRUE) + ggtitle("Lpl") #Traj1
+#plotSmoothers(sce.traj, assays(sce.traj)$counts, gene = "Ly6c2", alpha = 1, border = TRUE) + ggtitle("Ly6c2") #Traj2
+#plotSmoothers(sce.traj, assays(sce.traj)$counts, gene = "Gas6", alpha = 1, border = TRUE) + ggtitle("Gas6") #Traj2
+#plotSmoothers(sce.traj, assays(sce.traj)$counts, gene = "Ltc4s", alpha = 1, border = TRUE) + ggtitle("Ltc4s") #Traj2
+#plotSmoothers(sce.traj, assays(sce.traj)$counts, gene = "Ccl24", alpha = 1, border = TRUE) + ggtitle("Ccl24") #Traj2
+lapply(genes, function(gene) {
+  plotSmoothers(sce.traj, assays(sce.traj)$counts, gene = gene, alpha = 1, border = TRUE) + ggtitle(gene) #Traj3
+})
+dev.off()
+plotSmoothers(sce.traj, assays(sce.traj)$counts, gene = "Chil3", alpha = 1, border = TRUE) + ggtitle("Chil3")
+plotSmoothers(sce.traj, assays(sce.traj)$counts, gene = "Stat1", alpha = 1, border = TRUE) + ggtitle("Stat1")
+plotSmoothers(sce.traj, assays(sce.traj)$counts, gene = "Lyz2", alpha = 1, border = TRUE) + ggtitle("Lyz2")
+
+plotSmoothers(sce.traj, assays(sce.traj)$counts, gene = "Ly6c2", alpha = 1, border = TRUE) + ggtitle("Ly6c2")
+plotSmoothers(sce.traj, assays(sce.traj)$counts, gene = "Gas6", alpha = 1, border = TRUE) + ggtitle("Gas6")
+plotSmoothers(sce.traj, assays(sce.traj)$counts, gene = "Wwp1", alpha = 1, border = TRUE) + ggtitle("Wwp1")
+plotSmoothers(sce.traj, assays(sce.traj)$counts, gene = "Cx3cr1", alpha = 1, border = TRUE) + ggtitle("Cx3cr1")
+plotSmoothers(sce.traj, assays(sce.traj)$counts, gene = "Ccr2", alpha = 1, border = TRUE) + ggtitle("Ccr2")
+```
+
+
+```{r}
+sce.copy <- readRDS(here::here(dir, "trajectory_analysis", "sce.slingshot.rds"))
+```

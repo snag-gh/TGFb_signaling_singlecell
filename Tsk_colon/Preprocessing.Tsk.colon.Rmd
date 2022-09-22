@@ -1,0 +1,328 @@
+---
+title: "Preprocessing Tsk Colon samples"
+author: "Sushma Nagaraj"
+date: "7/8/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+suppressPackageStartupMessages({ 
+  library(scater)
+  library(scran)
+  library(tximeta)
+  library(SingleCellExperiment) 
+  library(DropletUtils)
+  library(Matrix)
+  library(cowplot)
+  library(stringr)
+  library(here)
+  })
+```
+
+#import Alevin quantification of 200K barcodes
+```{r}
+quantdir <- "/data/users/sushmanagaraj/projects/singlecell/TGFb_signaling/salmon_alevin"
+samples <- c("3262", "3252", "3268", "3270", "3271", "3272", "3253", "3263") #Tsk_colon
+
+sce_list <- vector("list", length(samples))
+names(sce_list) <- samples
+
+for(i in seq_along(samples)) {
+  sce <- tximeta::tximeta(coldata = data.frame(files = file.path(quantdir, samples[i], "all_barcodes/alevin/quants_mat.gz"), names = samples[i]), type = "alevin", dropInfReps=TRUE)
+  sce <- as(sce, "SingleCellExperiment")
+  sce$sample <- samples[i]
+  sce$barcode <- rownames(colData(sce))
+  sce_list[[samples[i]]] <- sce
+}
+```
+
+#EmptyDrops
+```{r}
+#3262
+set.seed(100)
+e.out <- emptyDrops(counts(sce_list[["3262"]]), niters = 20000, retain = 2000)
+e.out@metadata$retain
+summary(e.out$FDR <= 0.001)
+table(Sig=e.out$FDR <= 0.001, Limited=e.out$Limited)
+sce_list[["3262"]]$FDR <- e.out$FDR
+
+#3252
+set.seed(100)
+e.out <- emptyDrops(counts(sce_list[["3252"]]), niters = 20000, retain = 2000)
+e.out@metadata$retain
+summary(e.out$FDR <= 0.001)
+table(Sig=e.out$FDR <= 0.001, Limited=e.out$Limited)
+sce_list[["3252"]]$FDR <- e.out$FDR
+
+#3268
+set.seed(100)
+e.out <- emptyDrops(counts(sce_list[["3268"]]), niters = 20000, retain = 2000)
+e.out@metadata$retain
+summary(e.out$FDR <= 0.001)
+table(Sig=e.out$FDR <= 0.001, Limited=e.out$Limited)
+sce_list[["3268"]]$FDR <- e.out$FDR
+
+#3270
+set.seed(100)
+e.out <- emptyDrops(counts(sce_list[["3270"]]), niters = 20000, retain = 2000)
+e.out@metadata$retain
+summary(e.out$FDR <= 0.001)
+table(Sig=e.out$FDR <= 0.001, Limited=e.out$Limited)
+sce_list[["3270"]]$FDR <- e.out$FDR
+
+#3271
+set.seed(100)
+e.out <- emptyDrops(counts(sce_list[["3271"]]), niters = 20000, retain = 2000)
+e.out@metadata$retain
+summary(e.out$FDR <= 0.001)
+table(Sig=e.out$FDR <= 0.001, Limited=e.out$Limited)
+sce_list[["3271"]]$FDR <- e.out$FDR
+
+#3272
+set.seed(100)
+e.out <- emptyDrops(counts(sce_list[["3272"]]), niters = 20000, retain = 2000)
+e.out@metadata$retain
+summary(e.out$FDR <= 0.001)
+table(Sig=e.out$FDR <= 0.001, Limited=e.out$Limited)
+sce_list[["3272"]]$FDR <- e.out$FDR
+
+#3253
+set.seed(100)
+e.out <- emptyDrops(counts(sce_list[["3253"]]), niters = 20000, retain = 2000)
+e.out@metadata$retain
+summary(e.out$FDR <= 0.001)
+table(Sig=e.out$FDR <= 0.001, Limited=e.out$Limited)
+sce_list[["3253"]]$FDR <- e.out$FDR
+
+#3263
+set.seed(100)
+e.out <- emptyDrops(counts(sce_list[["3263"]]), niters = 20000, retain = 2000)
+e.out@metadata$retain
+summary(e.out$FDR <= 0.001)
+table(Sig=e.out$FDR <= 0.001, Limited=e.out$Limited)
+sce_list[["3263"]]$FDR <- e.out$FDR
+
+saveRDS(sce_list, here("data", "sce_list.Tsk_colon.rds"))
+```
+
+#Knee plots
+```{r}
+dir <- "Tsk_colon"
+if(!dir.exists(here(dir))) {
+  cat("Creating output directory..")
+  dir.create(here(dir))
+}
+
+if(!dir.exists(here(dir, "QC"))) {
+  cat("Creating output directory..")
+  dir.create(here(dir, "QC"))
+}
+
+pdf(here(dir, "QC", "knee_plots.pdf"))
+lapply(sce_list, function(sce) {
+  bcrank <- barcodeRanks(counts(sce))
+  all(rownames(bcrank) == colnames(sce))
+  knee <- metadata(bcrank)$knee
+  inflection <- metadata(bcrank)$inflection
+  umi.ge.knee <- sum(bcrank$total >= knee)
+  umi.ge.500 <- sum(bcrank$total >= 500)
+  umi.ge.inflection <- sum(bcrank$total >= inflection)
+  bcrank <- as.data.frame(bcrank)
+  bcrank$FDR <- sce$FDR <= 0.001
+  bcrank$FDR[is.na(bcrank$FDR)] <- "Ambient"
+  bcrank$FDR <- factor(bcrank$FDR, levels = c("FALSE", "TRUE", "Ambient"))
+  gg_color_hue <- function(n) {hcl(h=seq(15, 375, length=n+1), l=65, c=100)[1:n]}
+  plot.colors <- gg_color_hue(2)
+  ggplot(bcrank, aes(x = rank, y = total)) + geom_point(size = 0.5, aes(color = FDR), show.legend = TRUE) + scale_x_continuous(trans = "log10") + scale_y_continuous(trans = "log10") + geom_rug(size = 0.1, aes(color = FDR)) + geom_hline(mapping = aes(yintercept = knee, fill = "Knee"), linetype = "dashed", size = 0.5, color = "dodgerblue") + geom_hline(mapping = aes(yintercept = inflection, fill = "Inflection"), linetype = "dashed", size = 0.5, color = "darkgreen") + geom_hline(mapping = aes(yintercept = 500, fill = "500UMI"), linetype = "dashed", size = 0.5, color = "orange") + scale_color_manual(values=c(plot.colors, "darkgrey")) + scale_fill_manual("UMI", values = rep(1,3), guide=guide_legend(override.aes = list(colour=c("orange", "darkgreen", "dodgerblue")))) + labs(x = "Rank", y= "Total UMI count", title = paste0(sce$sample[1], " Knee=", umi.ge.knee, ",", round(knee), "; Inflection=", umi.ge.inflection, ",", round(inflection), "; ", umi.ge.500, ",", "500")) + theme_bw()
+})
+dev.off()
+```
+
+#Filter cells at FDR <= 0.001
+```{r}
+metadata <- read.csv(here("data", "metadata.csv"), header = TRUE)
+meta <- metadata[metadata$Sample %in% samples, ]
+all(samples == meta$Sample)
+
+filtered_sce_list <- vector("list", length(sce_list))
+names(filtered_sce_list) <- samples
+
+filtered_sce_list <- lapply(sce_list, function(sce) {
+  sce <- sce[,which(sce$FDR <= 0.001)]
+  rownames(colData(sce)) <- paste(sce$barcode, sce$sample, sep = ".")
+  sce$transgenic.line <- meta[meta$Sample == sce$sample[1], "Transgenic.line"]
+  sce$gender <- meta[meta$Sample == sce$sample[1], "Sex"]
+  sce$genotype <- meta[meta$Sample == sce$sample[1], "Genotype"]
+  sce$tissue <- meta[meta$Sample == sce$sample[1], "Tissue"]
+  sce$prep.date <- meta[meta$Sample == sce$sample[1], "Prep.date"]
+  sce$dad <- meta[meta$Sample == sce$sample[1], "Dad"]
+  sce$mums <- meta[meta$Sample == sce$sample[1], "Mums"]
+  sce$DOB <- meta[meta$Sample == sce$sample[1], "DOB"]
+  sce$cage <- meta[meta$Sample == sce$sample[1], "Cage"]
+  return(sce)
+})
+
+sce <- do.call(cbind, filtered_sce_list)
+saveRDS(sce, here("data", "sce.Tsk_colon.rds"))
+```
+
+#Add gene metadata
+```{r}
+rowData(sce)$chr.loc <- as.character(seqnames(rowRanges(sce)))
+library('rtracklayer')
+my_file <- "/data/users/sushmanagaraj/ref/mm/vM25/gencode.vM25.annotation.gtf"
+my_obj <- import(my_file)
+temp <- my_obj@elementMetadata
+gn <- temp[temp$type == "gene", c("gene_id", "gene_name", "gene_type")]
+rowData(sce)$gene_name <- gn[match(rowData(sce)$gene_id, gn$gene_id), "gene_name"]
+library(stringr)
+rowData(sce)$gene_id_trimmed <- str_sub(rowData(sce)$gene_id, 1, 18) 
+
+rownames(sce) <- uniquifyFeatureNames(rowData(sce)$gene_id_trimmed, rowData(sce)$gene_name)
+```
+
+#QC plots
+```{r}
+mito <- which(rowData(sce)$chr.loc == "chrM")
+stats <- perCellQCMetrics(sce, subsets = list(Mt = mito))
+colData(sce) <- cbind(colData(sce), stats)
+
+sce$log10GenesPerUMI <- log10(sce$detected)/ log10(sce$sum)
+sce$mitoRatio <- sce$subsets_Mt_percent / 100
+
+cellqc <- colData(sce.dbl)
+cellqc <- as.data.frame(cellqc)
+
+#pdf(here(dir, "QC", "qc_plots.pdf"))
+pdf(here(dir, "QC", "post_qc_plots.pdf"))
+# plot the number of cell counts per sample
+ggplot(cellqc, aes(x=sample, fill=sample)) + geom_bar() + theme_classic() + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) + theme(plot.title = element_text(hjust=0.5, face="bold")) + ggtitle("NCells")
+
+# plot the number UMIs/transcripts per cell
+ggplot(cellqc, aes(color=sample, x=sum, fill= sample)) + geom_density(alpha = 0.2) + scale_x_log10() + theme_classic() + ylab("Cell density") + geom_vline(xintercept = 500)
+
+ggplot(cellqc, aes(x=sample, y=sum, fill= sample)) + geom_boxplot() + theme_classic() + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) + theme(plot.title = element_text(hjust=0.5, face="bold")) 
+
+# plot the distribution of genes detected per cell via histogram
+ggplot(cellqc, aes(color=sample, x=detected, fill= sample)) + geom_density(alpha = 0.2) + theme_classic() + scale_x_log10() + geom_vline(xintercept = 200)
+
+# plot the distribution of genes detected per cell via boxplot
+ggplot(cellqc, aes(x=sample, y=log10(detected), fill=sample)) + geom_boxplot() + theme_classic() + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) + theme(plot.title = element_text(hjust=0.5, face="bold")) + ggtitle("NCells vs NGenes")
+
+# plot the correlation between genes detected and number of UMIs and determine whether strong presence of cells with low numbers of genes/UMIs
+ggplot(cellqc, aes(x=sum, y=detected, color=mitoRatio)) + geom_point() + scale_colour_gradient(low = "gray90", high = "blue") + stat_smooth(method=lm) + scale_x_log10() + scale_y_log10() + theme_classic() + geom_vline(xintercept = 500) + geom_hline(yintercept = 200) + facet_wrap(~sample)
+
+# plot the distribution of mitochondrial gene expression detected per cell
+ggplot(cellqc, aes(color=sample, x=mitoRatio, fill=sample)) + geom_density(alpha = 0.2) + scale_x_log10() + theme_classic() + geom_vline(xintercept = 0.35)
+ggplot(cellqc, aes(color=sample, x=mitoRatio, fill=sample)) + geom_density(alpha = 0.2) + theme_classic() + geom_vline(xintercept = 0.35)
+ggplot(cellqc, aes(x=sample, y=mitoRatio, fill=sample)) + geom_boxplot() + theme_classic() + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) + geom_hline(yintercept = 0.35) + theme(plot.title = element_text(hjust=0.5, face="bold")) 
+
+# plot the overall complexity of the gene expression by visualizing the genes detected per UMI
+ggplot(cellqc, aes(x=log10GenesPerUMI, color = sample, fill=sample)) + geom_density(alpha = 0.2) + theme_classic() + geom_vline(xintercept = 0.7)
+dev.off()
+```
+
+#Filtering on QC thresholds
+```{r}
+#Scater qc
+mito.qc.1 <- isOutlier(sce$subsets_Mt_percent, type = "higher", batch = sce$sample)
+attr(mito.qc.1, "thresholds")
+#          3252     3253    3262     3263    3268     3270     3271     3272
+#lower      -Inf     -Inf    -Inf     -Inf    -Inf     -Inf     -Inf     -Inf
+#higher 17.31448 15.13773 19.4236 18.48399 19.4375 19.07012 11.54771 15.89797
+
+detected.qc.1 <- isOutlier(sce$detected, type = "lower", log = TRUE, batch = sce$sample)
+attr(detected.qc.1, "thresholds")
+#           3252     3253     3262     3263     3268    3270     3271     3272
+#lower  146.3173 79.92757 49.84965 42.86052 69.52265 40.0739 101.4792 52.69221
+#higher      Inf      Inf      Inf      Inf      Inf     Inf      Inf      Inf
+
+sum.qc.1 <- isOutlier(sce$sum, type = "lower", log = TRUE, batch = sce$sample)
+attr(sum.qc.1, "thresholds")
+#           3252     3253    3262     3263     3268     3270     3271     3272
+#lower  254.5781 106.0937 80.4882 76.40912 125.3494 51.07533 93.18016 60.09086
+#higher      Inf      Inf     Inf      Inf      Inf      Inf      Inf      Inf
+
+
+mito.qc <- sce$subsets_Mt_percent > 35
+detected.qc <- sce$detected < 200
+sum.qc <- sce$sum < 500
+comp.qc <- sce$log10GenesPerUMI < 0.7
+discard <- mito.qc | detected.qc | sum.qc | comp.qc
+data.frame(UMI = sum(sum.qc), DETECTED = sum(detected.qc), MT = sum(mito.qc, na.rm = TRUE), COMPLEXITY = sum(comp.qc), TOTAL = sum(discard))
+
+sce$discard <- discard
+sce.preqc <- sce
+
+sce.preqc$sample <- as.factor(sce.preqc$sample)
+pdf(here(dir, "QC", "qc.violin_plots.pdf"))
+plotColData(sce.preqc, x="sample", y="sum", colour_by = "discard") + scale_y_log10() + ggtitle("Total count")
+plotColData(sce.preqc, x="sample", y="detected", colour_by = "discard") + scale_y_log10() + ggtitle("Detected features")
+plotColData(sce.preqc, x="sample", y="subsets_Mt_percent", colour_by = "discard") + ggtitle("Mito percent")
+plotColData(sce.preqc, x = "sum", y = "subsets_Mt_percent", colour_by = "discard")
+plotColData(sce.preqc, x = "detected", y = "subsets_Mt_percent", colour_by = "discard")
+for (i in levels(sce.preqc$sample)) {
+  new <- colData(sce.preqc)[sce.preqc$sample == i, ]
+  plot(new[,"sum"],new[,"subsets_Mt_percent"], main = i, col = I(as.integer(new[,"discard"])+1))
+  plot(new[,"detected"],new[,"subsets_Mt_percent"], main = i, col = I(as.integer(new[,"discard"])+1))
+}
+dev.off()
+
+sce <- sce[,!discard]
+```
+
+
+```{r}
+discarded <- sce.preqc[,sce.preqc$discard]
+set.seed(1000)
+clusters <- quickCluster(discarded)
+table(clusters)
+discarded <- computeSumFactors(discarded, cluster = clusters)
+discarded <- logNormCounts(discarded)
+summary(sizeFactors(discarded))
+plot(librarySizeFactors(discarded), sizeFactors(discarded), pch = 16, xlab = "library size factors", ylab = "Deconvolution factors", log = "xy", col = sce$sample)
+discarded <- discarded[-mito, ]
+dec.d <- modelGeneVar(discarded, block = discarded$sample)
+chosen.hvgs.d <- getTopHVGs(dec.d, prop = 0.1)
+set.seed(0010101010)
+discarded<- runPCA(discarded, subset_row = chosen.hvgs.d, BSPARAM = BiocSingular::RandomParam()) 
+set.seed(1111001)
+discarded <- runTSNE(discarded, dimred = "PCA")
+tsne.d <- plotTSNE(discarded, colour_by = "sample")
+
+set.seed(1100101001)
+discarded <- runUMAP(discarded, dimred = "PCA")
+umap.d <- plotUMAP(discarded, colour_by = "sample")
+
+plotTSNE(discarded, colour_by = "Snca")
+plotTSNE(discarded, colour_by = "Hbb-bs")
+
+g.d <- buildSNNGraph(discarded, k = 10, use.dimred = "PCA")
+clust.d <- igraph::cluster_louvain(g.d)$membership
+
+discarded$cluster <- clust.d
+discarded$cluster <- as.factor(discarded$cluster)
+plotTSNE(discarded, colour_by = "cluster", text_by = "cluster")
+
+markers.d <- findMarkers(discarded, discarded$cluster, direction = "up", BPPARAM = BiocParallel::MulticoreParam(5))
+genes.d <- lapply(markers.d, function(x) {rownames(x)[x$Top <= 50]})
+sink(here(dir, "discarded_cells", "genes_per_cluster.txt"))
+unlist(lapply(genes.d, paste, collapse = " "))
+sink()
+
+plotDots(discarded, features = c("Uchl1", "Snap25", "Elavl3", "Elavl4"), group = I(as.factor(discarded$cluster))) + theme_classic()
+
+discarded$low.complexity <- discarded$log10GenesPerUMI < 0.7
+discarded$high.mito <- discarded$subsets_Mt_percent > 35
+discarded$low.detected <- discarded$detected < 200
+discarded$low.umi <- discarded$sum < 300
+```
+
+
+```{r}
+sce_list <- readRDS(here("data", "sce_list.Tsk_colon.rds"))
+
+saveRDS(sce, here("data", "sce.Tsk_colon.rds"))
+sce <- readRDS(here("data", "sce.Tsk_colon.rds"))
+```

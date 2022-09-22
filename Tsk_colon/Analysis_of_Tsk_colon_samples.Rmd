@@ -1,0 +1,592 @@
+---
+title: "TGFb Signaling Tsk colon"
+author: "Sushma Nagaraj"
+date: "7/9/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+suppressPackageStartupMessages({ 
+  library(scater)
+  library(scran)
+  library(cowplot)
+  library(stringr)
+  library(here)
+  })
+```
+
+```{r}
+dir <- "Tsk_colon"
+```
+
+#Normalization
+```{r}
+set.seed(1000)
+clusters <- quickCluster(sce)
+table(clusters)
+sce <- computeSumFactors(sce, cluster = clusters, BPPARAM = BiocParallel::MulticoreParam(10))
+sce <- logNormCounts(sce)
+summary(sizeFactors(sce))
+plot(librarySizeFactors(sce), sizeFactors(sce), pch = 16, xlab = "library size factors", ylab = "Deconvolution factors", log = "xy", col = sce$sample)
+```
+
+```{r}
+saveRDS(sce, here(dir, "sce.Tsk_colon.intermediate.all_genes.rds"))
+mito <- which(rowData(sce)$chr.loc == "chrM")
+sce <- sce[-mito, ]
+```
+
+# Variance modelling
+```{r variance_modelling}
+if(!dir.exists(here(dir, "plots"))) {
+  cat("Creating output directory..")
+  dir.create(here(dir, "plots"))
+}
+
+#Combined analysis
+dec <- modelGeneVar(sce, block = sce$sample, density.weights = FALSE)
+#dec.pois <- modelGeneVarByPoisson(sce, block = sce$sample)
+
+#chosen.hvgs <- getTopHVGs(dec.pois, prop = 0.1)
+chosen.hvgs <- getTopHVGs(dec, prop = 0.2)
+blocked.stats <- dec$per.block
+pdf(here(dir, "plots", "Variance_modeling.pdf"))
+for (i in colnames(blocked.stats)) {
+  current <- blocked.stats[[i]]
+  hv <- current[current$total >= 1, ]
+  plot(current$mean, current$total, main = i, pch = 16, cex = 0.5, xlab = "Mean of log-expression", ylab = "Variance of log-expression")
+  text(hv$mean, hv$total, row.names(hv), cex = 0.7)
+  curfit <- metadata(current)
+  curve(curfit$trend(x), col = "dodgerblue", add = TRUE, lwd = 2)
+}
+dev.off()
+```
+
+#Dimentionality reduction
+```{r}
+set.seed(0010101010)
+sce <- runPCA(sce, subset_row = chosen.hvgs, BSPARAM = BiocSingular::RandomParam()) 
+#percent.var <- attr(reducedDim(sce), "percentVar")
+#chosen.elbow <- PCAtools::findElbowPoint(percent.var)
+#pdf(here(dir, "plots", "elbow_plot.pdf"))
+#plot(percent.var, xlab = "PC", ylab = "Variance explained (%)")
+#abline(v=chosen.elbow, col = "red")
+#dev.off()
+
+pca <- plotPCA(sce, colour_by = "sample")
+
+set.seed(1111001)
+sce.temp <- runTSNE(sce, dimred = "PCA")
+tsne <- plotTSNE(sce.temp, colour_by = "sample")
+
+set.seed(1100101001)
+sce.temp <- runUMAP(sce.temp, dimred = "PCA")
+umap <- plotUMAP(sce.temp, colour_by = "sample")
+
+pdf(here(dir, "plots", "PCA_TSNE_UMAP.by_sample.pdf"))
+pca
+tsne
+umap
+dev.off()
+```
+
+#Clustering without batch correction
+```{r}
+uncorrected <- sce.temp
+
+g1 <- buildSNNGraph(uncorrected, k = 10, use.dimred = "PCA")
+clust1 <- igraph::cluster_louvain(g1)$membership
+table(clust1)
+table(clust1, uncorrected$sample)
+uncorrected$cluster <- factor(clust1)
+sce$tsk.c.cluster.k10.nobc <- factor(clust1)
+
+tsne1 <- plotTSNE(uncorrected, colour_by = "sample")
+tsne2 <- plotTSNE(uncorrected, colour_by = "cluster", text_by = "cluster")
+
+umap1 <- plotUMAP(uncorrected, colour_by = "sample")
+umap2 <- plotUMAP(uncorrected, colour_by = "cluster", text_by = "cluster")
+
+pdf(here(dir, "plots", "TSNE.clusters_without_batch_correction.pdf"))
+tsne1
+tsne2
+umap1
+umap2
+dev.off()
+```
+
+#Batch correction
+```{r}
+library(batchelor)
+set.seed(1000101001)
+mnn.out <- fastMNN(sce, subset.row = chosen.hvgs, d = 50, batch = sce$sample, BSPARAM = BiocSingular::RandomParam(deferred = TRUE))
+
+# proportion of variance lost
+metadata(mnn.out)$merge.info$lost.var
+
+reducedDim(sce, "corrected") <- reducedDim(mnn.out, "corrected")
+
+set.seed(1111001)
+sce <- runTSNE(sce, dimred = "corrected", BPPARAM = BiocParallel::MulticoreParam(10))
+tsne <- plotTSNE(sce, colour_by = "sample")
+
+set.seed(1100101001)
+sce <- runUMAP(sce, dimred = "corrected", BPPARAM = BiocParallel::MulticoreParam(10))
+umap <- plotUMAP(sce, colour_by = "sample")
+
+pdf(here(dir, "plots", "TSNE_UMAP.by_sample.batch_corrected.pdf"))
+tsne
+umap
+dev.off()
+```
+
+#Clustering
+```{r clustering}
+set.seed(11011)
+g <- buildSNNGraph(sce, k = 10, use.dimred = "corrected")
+clust <- igraph::cluster_louvain(g)$membership
+table(clust)
+sce$cluster <- factor(clust)
+table(sce$cluster, sce$sample)
+
+plotTSNE(sce, colour_by = "cluster", text_by = "cluster", point_alpha = 1, point_size = 0.5) 
+plotUMAP(sce, colour_by = "cluster", text_by = "cluster", point_alpha = 1, point_size = 0.5) 
+
+colnames(colData(sce))[colnames(colData(sce)) == "cluster"] <- "tsk.c.cluster.k10"
+
+table(sce$tsk.c.cluster.k10, sce$sample)
+
+plotUMAP(sce, colour_by = "tsk.c.cluster.k10", text_by = "tsk.c.cluster.k10", point_alpha = 1, point_size = 0.5) 
+plotTSNE(sce, colour_by = "tsk.c.cluster.k10", text_by = "tsk.c.cluster.k10", point_alpha = 1, point_size = 0.5) 
+```
+
+#Marker genes
+```{r}
+clusterdir <- "cluster.k10"
+if(!dir.exists(here(dir, clusterdir))) {
+  cat("Creating output directory..")
+  dir.create(here(dir, clusterdir))
+}
+
+markers <- findMarkers(sce, sce$tsk.c.cluster.k10, direction = "up", BPPARAM = BiocParallel::MulticoreParam(5))
+saveRDS(markers, file = here(dir, clusterdir, "markers.rds"))
+genes <- lapply(markers, function(x) {rownames(x)[x$Top <= 50]})
+sink(here(dir, clusterdir, "genes_per_cluster.txt"))
+unlist(lapply(genes, paste, collapse = " "))
+sink()
+
+#genes5 <- lapply(markers, function(x) {rownames(x)[x$Top <= 10]})
+#genes5 <- unique(unlist(genes5))
+#genes5 <- genes5[!is.na(genes5)]
+
+#pdf(here(dir, clusterdir, "markers_heatmap.pdf"), height = 30)
+#plotHeatmap(sce, genes5, colour_columns_by = c("tsk.sb.cluster.k10", "sample"), show_colnames = FALSE, clustering_method = 'ward.D2', #fontsize_row = 2)
+#dev.off()
+
+lapply(1:length(markers), function(x) {
+  c <- markers[[x]]
+  c0.05 <- c[c$FDR < 0.05, ]
+  write.csv(c0.05, file = here(dir, clusterdir, paste0("cluster", x, ".marker_genes.FDR0.05.csv")))
+  write.csv(c, file = here(dir, clusterdir, paste0("cluster", x, ".findMarkers.csv")))
+})
+
+```
+
+#Plot UMI by cluster
+```{r}
+sce$logUMI <- log10(sce$sum)
+sce$logDetected <- log10(sce$detected)
+
+pdf(here(dir, clusterdir, "logUMI_by_cluster.violin_plot.pdf"))
+plotColData(sce, x = "tsk.c.cluster.k10", y = "logUMI", colour_by = "tsk.c.cluster.k10")
+plotColData(sce, x = "tsk.c.cluster.k10", y = "logDetected", colour_by = "tsk.c.cluster.k10")
+dev.off()
+```
+
+
+#Find doublets
+```{r doublets}
+library(scDblFinder)
+sce <- scDblFinder(sce, samples = "sample")
+pdf(here(dir, "cluster.k10", "Doublet_scores.pdf"))
+plotColData(sce, x = "tsk.c.cluster.k10", y = "scDblFinder.score", colour_by = "scDblFinder.class")
+dev.off()
+
+plotDoubletMap(sce)
+```
+
+#Annotation
+```{r}
+pdf(here(dir, clusterdir, "Cell_type_exploration.dotplots.pdf"))
+#Endothelial cells
+#REFERENCE - Single Cell Analysis of Endothelial Cells Identified Organ-Specific Molecular Signatures and Heart-Specific Cell Populations and Molecular Features
+#Endothelial cells - Cdh5+, Pecam1+, Tie1+
+#Lymphatic endothelaial cells - Mmrn1+, Prox1+
+#plotExpression(sce, features = c("Mmrn1", "Prox1", "Pgf", "Plvap", "Sox18", "Flt1", "Pdpn", "Ece1"), x = I(as.factor(sce$tsk.sb.cluster.k10)), colour_by = I(as.factor(sce$tsk.sb.cluster.k10)), show_violin = TRUE)
+plotDots(sce, features = c("Mmrn1", "Prox1", "Pgf", "Plvap", "Sox18", "Flt1", "Pdpn"), group = I(as.factor(sce$tsk.c.cluster.k10))) + theme_classic()
+plotDots(sce, features = c("Mmrn1", "Prox1", "Pgf", "Plvap", "Sox18", "Flt1", "Pdpn", "Pecam1", "Cdh5", "Tie1"), group = I(as.factor(sce$manual_ann))) + theme_classic() + theme(axis.text.x = element_text(angle = 90))
+
+#T-Cells (CD52+, CD3D+, CD3E+, CCL5+, IL7R+)
+#B-cells (Cd79a, Jchain) https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2195946/
+#plotExpression(sce, features = c("Il7r", "Ccl5", "Cd3d", "Ptprc", "Cd52", "Cd3e"), x = I(as.factor(sce$tsk.sb.cluster.k10)), colour_by = I(as.factor(sce$tsk.sb.cluster.k10)), show_violin = TRUE)
+plotDots(sce, features = c("Il7r", "Ccl5", "Cd3d", "Cd3e", "Cd79a", "Cd79b", "Jchain", "Cd52", "Igkc", "Vpreb3", "Iglc3"), group = I(as.factor(sce$tsk.c.cluster.k10))) + theme_classic()
+
+#Neural crest derived neurons
+plotDots(sce, features = c("Snap25", "Uchl1", "Elavl3", "Elavl4", "Prph", "Actl6b"), group = I(as.factor(sce$tsk.c.cluster.k10))) + theme_classic()
+
+#Mesoderm derived neurons
+plotDots(sce, features = c("Met", "Slpi", "Cdh3", "Slc17a9", "Krt7", "Krt18", "Krt19", "Syne2"), group = I(as.factor(sce$tsk.c.cluster.k10))) + theme_classic()
+
+#Glia
+plotDots(sce, features = c("Sox10", "Plp1", "Gfap", "Fcer1g", "Ramp1", "Inava", "Nes", "S100b", "Ngfr"), group = I(as.factor(sce$tsk.c.cluster.k10))) + theme_classic()
+
+#Macrophages
+#Itgam : Cd11b
+#Itgax : Cd11c
+#Itgae : Cd103
+plotDots(sce, features = c("Cd163", "Ccr2", "Cx3cr1", "Lyz2", "Cd38", "Cd72", "Lsp1", "Fn1", "Mrc1", "Stmn1", "Spint1", "Ctss", "Ifi211", "Cd14", "Csf1r", "Ly86", "Cd74", "Itgam", "Itgax", "Itgae", "Fcer1g", "Tyrobp"), group = I(as.factor(sce$tsk.c.cluster.k10))) + theme_classic()
+
+#Smooth muscle cells
+plotDots(sce, features = c("Myh11", "Myl9", "Acta2", "Actg2", "Myom1", "Pdlim3", "Tgfb1i1", "Grem1", "Cnn2"), group = I(as.factor(sce$tsk.c.cluster.k10))) + theme_classic()
+
+#ICC
+plotDots(sce, features = c("Hand1", "Kit", "Ano1", "Thbs4", "Etv1", "Chrdl1", "Prkcq", "Hcn4", "Elovl6", "Gja1", "Edn3", "Cd34", "Ptprc", "Mitf"), group = I(as.factor(sce$tsk.c.cluster.k10))) + theme_classic()
+
+#Fibroblasts
+#PαC were identified in the GI musculature of mice and humans as KIT-negative fibroblast-like cells [3, 4]. PαC express PDGFRA, the #marker for the cells, CD34, a common progenitor cell marker, and a Ca2+-activated K+ channel, SK3 (KCNN3), all of which are not #found in ICC. 
+plotDots(sce, features = c("Pdgfra", "Penk", "Cd34", "Kcnn3", "Slit2", "Etv1", "Dpt", "Calcrl", "Car8", "Scube2", "Piezo2", "Ngf", "Adcyap1r1"), group = I(as.factor(sce$tsk.c.cluster.k10))) + theme_classic()
+plotDots(sce, features = c("Penk", "Cacna1g", "Cacna1h", "Cacna1d", "Kit", "Cd34", "Kcnn3", "Pdgfra", "Car8", "Etv1", "Slc6a2", "Scn7a", "Prnp"), group = I(as.factor(sce$tsk.c.cluster.k10))) + theme_classic() + theme(axis.text.x = element_text(angle = 90))
+plotDots(sce, features = c("Igsf10", "Gask1b", "Tnc", "Lepr", "Hpse", "Eln", "Igfbp3", "Slit3", "Adamdec1", "C4b", "Pcsk5"), group = I(as.factor(sce$manual_ann))) + theme_classic() +theme(axis.text.x = element_text(angle = 90))
+
+#
+plotDots(sce.full, features = c("Il11", "Il24", "Il13ra2", "Twist1", "Wnt2", "Wnt2b", "Wnt4", "Dkk3", "Wnt5b", "Bmp4", "Fap"), group = I(as.factor(sce.full$manual_ann))) + theme_classic() + theme(axis.text.x = element_text(angle = 90))
+plotDots(sce, features = c("Pdgfrb"), group = I(as.factor(sce$tsk.c.cluster.k10))) + theme_classic()
+plotUMAP(sce.full, colour_by = "Wnt2", point_size = 0.3, point_alpha = 0.4)
+plotUMAP(sce.full, colour_by = "Twist1", point_size = 0.3, point_alpha = 0.4)
+plotUMAP(sce.full, colour_by = "Fap", point_size = 0.3, point_alpha = 0.4)
+
+#Mural cells - Pericytes and VSMC
+plotDots(sce, features = c("Myo1b", "Klhl23", "Btbd3", "Inpp4b", "Bcr", "Gjc1", "Syne2", "Gcnt2", "Itga1", "P3h2", "Tmem50b", "Cdc42ep3", "Rock1", "Des", "Rgs5", "Ptprc", "Mcam", "Pdgfrb", "Acta2", "Flt1", "Notch3"), group = I(as.factor(sce$manual_ann))) + theme_classic() +theme(axis.text.x = element_text(angle = 90))
+
+#plotDots(sce, features = c("Cd74", "Tagln", "Ccl8", "Cd63", "Selenom", "Fth1", "Ccl12", "Ramp1", "C1qc"), group = I(as.factor(sce$tsk.sb.cluster.k10))) + theme_classic()
+
+#RBC
+plotDots(sce, features = c("Hbb-bs"), group = I(as.factor(sce$tsk.c.cluster.k10))) + theme_classic()
+
+#Epithelial like cells
+plotDots(sce, features = c("Cdh1", "Adipoq", "Per1", "Per2", "Epcam", "Ctrb1"), group = I(as.factor(sce$tsk.c.cluster.k10))) + theme_classic()
+
+#Pan-immune : CD45/Ptprc
+#Myeloid: Cd163, Cd16/Fcgr3, Cd68
+#Granulocyte: Cd15/Fut4
+plotDots(sce, features = c("Ptprc", "Cd163", "Fcgr3", "Cd68", "Ccr2", "Fut4", "Cd3e", "Fcer1g"), group = I(as.factor(sce$manual_ann))) + theme_classic() +theme(axis.text.x = element_text(angle = 90))
+dev.off()
+
+pdf(here(dir, clusterdir, "dot_plot_of_marker_genes.pdf"), width = 10)
+#pdf(here(dir, clusterdir, "dot_plot_of_marker_genes.no_doublets.pdf"))
+plotDots(sce, features = c("Snap25", "Uchl1", "Elavl3", "Elavl4", "Ret", "Prph", "Actl6b", "Plp1", "Sox10", "S100b", "Met", "Slpi", "Cdh3", "Slc17a9", "Pdgfra", "Penk", "Calca", "Calcb", "Myh11", "Myl9", "Acta2", "Actg2", "Myom1", "Pdlim3", "Hand1", "Etv1", "Ano1", "Kit", "Chrdl1", "Cd3d", "Cd3e", "Cd163", "Ccr2", "Cx3cr1", "Hbb-bs", "Mrc1", "Fcer1g", "Tyrobp", "Sox18", "Prox1", "Mmrn1"), group = I(as.factor(sce$tsk.sb.cluster.k10))) + theme_classic()
+dev.off()
+
+sce$manual_ann <- "unknown"
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("1")] <- "Fibroblast 7"
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("2")] <- "Macrophage 7"
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("3")] <- "Fibroblast 1"
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("4")] <- "T cells"
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("5")] <- "Macrophage 1" 
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("6")] <- "Fibroblast 5"
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("7")] <- "Flt1+Plvap+Endothelialcells" #Plvap+ Flt1+
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("8")] <- "T cells" 
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("9")] <- "Macrophage 2"
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("10")] <- "Fibroblast 3"
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("11")] <- "ICC 1"
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("12")] <- "Possible doublets" #Macrophage, Fibroblasts
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("13")] <- "T cells"
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("14")] <- "Bcells 2" #Jchain- 
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("15")] <- "Fibroblast 2" 
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("16")] <- "Smooth muscle cells"
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("17")] <- "Macrophage 5"
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("18")] <- "ICC 2"
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("19")] <- "Fibroblast 6" 
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("20")] <- "Fibroblast 4"
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("21")] <- "Bcells 1" #Jchain+ Plasma cells?? Also has macrophage genes
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("22")] <- "Epithelial like cells"
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("23")] <- "Fibroblast 9"
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("24")] <- "Macrophage 3"
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("25")] <- "Mmrn1+Prox1+Endothelial cells" #Prox1+ Mmrn1+
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("26")] <- "Macrophage 4" 
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("27")] <- "Neurons"
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("28")] <- "Smooth muscle cells"
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("29")] <- "Macrophage 6"
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("30")] <- "MENS"
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("31")] <- "Glia"
+sce$manual_ann[sce$tsk.c.cluster.k10 %in% c("32")] <- "Fibroblast 8"
+
+sce$manual_ann <- as.factor(sce$manual_ann)
+sce$manual_ann <- droplevels(sce$manual_ann)
+#pdf(here(dir, clusterdir, "dot_plot_of_marker_genes.with_annotation.pdf"), width = 10, height = 10)
+pdf(here(dir, clusterdir, "dot_plot_of_marker_genes.with_granular_annotation.no_doublets.pdf"), width = 10, height = 10)
+plotDots(sce, features = c("Snap25", "Uchl1", "Elavl3", "Elavl4", "Ret", "Prph", "Actl6b", "Plp1", "Sox10", "S100b", "Met", "Slpi", "Cdh3", "Slc17a9", "Pdgfra", "Kcnn3", "Cd34", "Penk", "Calca", "Calcb", "Myh11", "Myl9", "Acta2", "Actg2", "Myom1", "Pdlim3", "Hand1", "Etv1", "Ano1", "Kit", "Chrdl1", "Cd3d", "Cd3e", "Cd163", "Ccr2", "Cx3cr1", "Mrc1", "Fcer1g", "Tyrobp", "Sox18", "Prox1", "Mmrn1", "Epcam", "Cdh1"), group = I(as.factor(sce$manual_ann))) + theme_classic() + theme(axis.text.x = element_text(angle = 90))
+dev.off()
+
+```
+
+#More exploration
+```{r}
+plotDots(sce, features = c("Snap25", "Uchl1", "Elavl3", "Elavl4", "Prph", "Actl6b", "Pou3f3", "Sox10", "Gphn", "Phox2b"), group = I(as.factor(sce$tsk.c.cluster.k10))) + theme_classic()
+plotDots(sce, features = c("H2-D1"), group = I(as.factor(sce$tsk.c.cluster.k10))) + theme_classic()
+plotDots(sce, features = c("Gucy1a1", "Gucy1a2", "Gucy1b1", "Ngf", "Ntrk1"), group = I(as.factor(sce$manual_ann))) + theme_classic() + theme(axis.text.x = element_text(angle = 90))
+pdf(here(dir, "plots_for_select_genes", "Tsk_colon.Gucy_genes.pdf"))
+lapply(c("Fibroblast 1", "Fibroblast 2", "Fibroblast 3", "Fibroblast 4", "Fibroblast 5", "Fibroblast 6", "Fibroblast 7", "Fibroblast 8", "Fibroblast 9"), function(x) {
+  plotExpression(sce[,sce$manual_ann == x], features = c("Gucy1a1", "Gucy1a2", "Gucy1b1", "Ngf", "Ntrk1"), x = I(as.factor(sce$genotype[sce$manual_ann == x])), col = I(as.factor(sce$sample[sce$manual_ann == x]))) + theme(axis.text.x = element_text(angle = 90)) + ggtitle(x)
+})
+dev.off()
+
+plotDots(sce, features = c("Bmp1", "Bmp2", "Bmp3", "Bmp4"), group = I(as.factor(sce$manual_ann))) + theme_classic() +theme(axis.text.x = element_text(angle = 90))
+
+plotDots(sce, features = c("Nanog", "Kit", "Nt5e", "Eng"), group = I(as.factor(sce$manual_ann))) + theme_classic() +theme(axis.text.x = element_text(angle = 90))
+
+plotDots(sce, features = c("Gucy1a1", "Gucy1a2", "Gucy1b1", "Kit", "Ano1"), group = I(as.factor(sce$manual_ann))) + theme_classic() +theme(axis.text.x = element_text(angle = 90))
+
+plotDots(sce, features = c("Cadm2", "Ncam1", "Bag6", "Phf2", "Fam120a", "Ckap2", "Dock9"), group = I(as.factor(sce$manual_ann))) + theme_classic() +theme(axis.text.x = element_text(angle = 90))
+
+plotDots(sce, features = c("Cdk18", "Snx24", "Mrpl22", "Lfng", "Calcb", "Bdnf", "Hmga2", "Arf2", "Fam227a"), group = I(as.factor(sce$manual_ann))) + theme_classic() +theme(axis.text.x = element_text(angle = 90))
+
+plotDots(sce.m, features = c("Uchl1", "Ret", "Ncam1", "Ncam2", "Elavl3", "Elavl4", "Pirt"), group = I(as.factor(sce.m$manual_ann))) + theme_classic() +theme(axis.text.x = element_text(angle = 90))
+
+#Inflammatory Fibroblast subtype markers from "Distinct fibroblast subsets drive inflammation and damage in arthritis"
+sce.fib <- sce.full[,sce.full$cell_type == "Fibroblast"]
+pdf(here(dir, "plots_for_select_genes", "Inflmmatory_fibroblasts_markers_in_arthritis.pdf"), height = 8)
+plotExpression(sce.fib, features = c("Fap", "Pdpn", "Thy1", "Sfrp2", "Col11a1", "Mfap4", "Tnfaip6", "Inhba", "Prg4", "Apod", "Clec3b", "Cd34", "Top2a", "Hmgb2", "Cdk1", "Clic5", "Col22a1", "Tspan15"), x = I(as.factor(sce.fib$manual_ann)), colour_by = I(as.factor(sce.fib$manual_ann)), point_size = 0, show_violin = TRUE) +theme(axis.text.x = element_text(angle = 90))
+dev.off()
+
+plotExpression(sce.fib, features = c("Fap", "Twist1", "Wnt2", "Rspo3"), x = I(as.factor(sce.fib$manual_ann)), colour_by = I(as.factor(sce.fib$manual_ann)), point_size = 0, show_violin = TRUE) +theme(axis.text.x = element_text(angle = 90))
+
+plotDots(sce.het, features = gwas$Gene, group = I(as.factor(sce.het$manual_ann))) + theme_classic() +theme(axis.text.x = element_text(angle = 90))
+
+plotExpression(sce, features = c("Igf2r"), x = I(as.factor(sce$manual_ann)), col = I(as.factor(sce$manual_ann))) + theme(axis.text.x = element_text(angle = 90)) 
+
+plotDots(sce, features = c("Wif1", "Nkd2", "Pcolce2", "Slpi", "Cd55", "Acta2", "Wnt2", "Sma", "Des", "Smtn"), group = I(as.factor(sce$tsk.c.cluster.k10))) + theme_classic()
+
+plotDots(sce.wt, features = c("Pde3a", "Pde3b", "Pde5a", "Pde2a", "Pde9a"), group = I(as.factor(sce.wt$manual_ann))) + theme_classic() +  theme(axis.text.x = element_text(angle = 90)) 
+
+plotDots(sce.wt, features = c("Kcnn1", "Kcnn2", "Kcnn3", "Kcnn4"), group = I(as.factor(sce.wt$manual_ann))) + theme_classic() +  theme(axis.text.x = element_text(angle = 90))
+
+plotDots(sce.wt, features = c("Tgfbr1", "Tgfbr2", "Smad2", "Smad3", "Smad4", "Smad7"), group = I(as.factor(sce.wt$manual_ann))) + theme_classic() +  theme(axis.text.x = element_text(angle = 90))
+
+plotExpression(sce.wt, features = c("Pde3a", "Pde3b", "Pde5a", "Pde2a", "Pde9a"), x = I(as.factor(sce.wt$manual_ann)), col = I(as.factor(sce.wt$manual_ann))) + theme(axis.text.x = element_text(angle = 90)) 
+
+plotExpression(sce.wt, features = c("Prkg1", "Gucy1b1"), x = I(as.factor(sce.wt$manual_ann)), col = I(as.factor(sce.wt$manual_ann))) + theme(axis.text.x = element_text(angle = 90)) 
+
+plotDots(sce.wt, features = c("Prkg1", "Gucy1b1"), group = I(as.factor(sce.wt$manual_ann))) + theme_classic() +  theme(axis.text.x = element_text(angle = 90)) 
+
+plotDots(sce.wt, features = c("Chrm2", "Chrm3"), group = I(as.factor(sce.wt$manual_ann))) + theme_classic() +  theme(axis.text.x = element_text(angle = 90)) 
+
+plotDots(sce, features = c("Ppp1r14a"), group = I(as.factor(sce$manual_ann))) + theme_classic() +  theme(axis.text.x = element_text(angle = 90)) 
+
+plotExpression(sce, features = c("Gphn"), x = I(as.factor(sce$genotype)), col = I(as.factor(sce$genotype))) + theme(axis.text.x = element_text(angle = 90)) 
+plotDots(sce, features = c("Gphn", "Uchl1", "Tubb3"), group = I(as.factor(sce$manual_ann))) + theme_classic() +  theme(axis.text.x = element_text(angle = 90))
+plotDots(sce, features = c("Tubb3"), group = I(as.factor(sce$manual_ann))) + theme_classic() +  theme(axis.text.x = element_text(angle = 90))
+
+plotDots(sce.c.wt, features = c("Elavl2", "Elavl3", "Elavl4", "Uchl1", "Met", "Pde10a", "Stx3", "Stmn2", "Snap25"), group = I(as.factor(sce.c.wt$manual_ann))) + theme_classic() +  theme(axis.text.x = element_text(angle = 90)) + ggtitle("Tsk Wildtype Colon")
+
+pdf(here(dir, "genes_from_Korsunsky_et_al.pdf"))
+plotDots(sce.c, features = c("Sparc", "Col3a1", "Cthrc1", "Col1a1", "Kif26b", "Mmp13", "Adam12", "Postn", "C6", "Adh1", "Itm2a", "C3", "Ogn", "Fbln1", "Ptgs2", "Fosb", "Arc", "Sema4a", "Cxcl2", "Mfap5", "Cyp4b1", "C1qtnf3", "Fbln2", "Cd34", "Pcolce2", "Ccl19", "Ccl21a", "Cxcl9", "Cd74", "Cxcl10"), group = I(as.factor(sce.c$manual_ann))) + theme_classic() +  theme(axis.text.x = element_text(angle = 90))
+dev.off()
+#
+plotExpression(sce.c, features = c("Sparc", "Col3a1", "Cthrc1", "Col1a1", "Kif26b", "Mmp13", "Adam12", "Postn"), x = I(as.factor(sce.c$manual_ann)), col = I(as.factor(sce.c$manual_ann)), point_size = 0, show_violin = TRUE) + theme(axis.text.x = element_text(angle = 90)) 
+
+plotDots(sce.c, features = c("Sparc", "Col3a1", "Mcam", "Notch1", "Notch2", "Notch3", "Thy1", "Jag1", "Jag2", "Dll4"), group = I(as.factor(sce.c$manual_ann))) + theme_classic() +  theme(axis.text.x = element_text(angle = 90))
+
+plotDots(sce.c, features = c("Lgr5", "Ccn1"), group = I(as.factor(sce.c$manual_ann))) + theme_classic() +  theme(axis.text.x = element_text(angle = 90))
+```
+
+#TSNE and UMAP plots with annotation
+```{r}
+colors <- c('#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231', '#911eb4', '#46f0f0', '#f032e6', '#bcf60c', '#fabebe', '#008080', '#e6beff', '#9a6324', '#046c9a', '#800000', '#cc3a1b', '#808000', '#4cabdc', '#808080', '#000075', '#ebcb2e', '#00ccff', "#ebcb2e", "#9ec22f", "#a9961b", "#cc3a1b", "#cc8778", "#999999", "#E69F00", "#56B4E9", "#009E73")
+
+#pdf(here(dir, clusterdir, "Tsk_colon.clusters.pdf"))
+pdf(here(dir, clusterdir, "Tsk_colon.clusters.with_doublets.pdf"))
+plotTSNE(sce, colour_by = "sample", text_by = "tsk.c.cluster.k10", point_alpha = 1, point_size = 0.5)
+plotTSNE(sce, colour_by = "tsk.c.cluster.k10", text_by = "tsk.c.cluster.k10", point_alpha = 1, point_size = 0.5) 
+plotTSNE(sce, colour_by = "logUMI", text_by = "tsk.c.cluster.k10", point_alpha = 1, point_size = 0.5)
+plotTSNE(sce, colour_by = "logDetected", text_by = "tsk.c.cluster.k10", point_alpha = 1, point_size = 0.5)
+plotTSNE(sce, colour_by = "scDblFinder.score", text_by = "tsk.c.cluster.k10", point_alpha = 1, point_size = 0.5)
+plotTSNE(sce, colour_by = "scDblFinder.class", text_by = "tsk.c.cluster.k10", point_alpha = 1, point_size = 0.5)
+#plotTSNE(sce, colour_by = "singleR_ann", text_by = "singleR_ann", point_alpha = 1, point_size = 0.5)
+#plotTSNE(sce, colour_by = "cell_cycle", text_by = "tsk.c.cluster.k10", point_alpha = 1, point_size = 0.5, text_size = 3)
+plotTSNE(sce, colour_by = "manual_ann", text_by = "manual_ann", point_alpha = 1, point_size = 0.5, text_size = 4)
+plotUMAP(sce, colour_by = "sample", text_by = "tsk.c.cluster.k10", point_alpha = 1, point_size = 0.5) 
+plotUMAP(sce, colour_by = "tsk.c.cluster.k10", text_by = "tsk.c.cluster.k10", point_alpha = 1, point_size = 0.5)
+plotUMAP(sce, colour_by = "logUMI", text_by = "tsk.c.cluster.k10", point_alpha = 1, point_size = 0.5)
+plotUMAP(sce, colour_by = "logDetected", text_by = "tsk.c.cluster.k10", point_alpha = 1, point_size = 0.5)
+plotUMAP(sce, colour_by = "scDblFinder.score", text_by = "tsk.c.cluster.k10", point_alpha = 1, point_size = 0.5)
+plotUMAP(sce, colour_by = "scDblFinder.class", text_by = "tsk.c.cluster.k10", point_alpha = 1, point_size = 0.5)
+#plotUMAP(sce, colour_by = "singleR_ann", text_by = "singleR_ann", point_alpha = 1, point_size = 0.5)
+#plotUMAP(sce, colour_by = "cell_cycle", text_by = "tsk.c.cluster.k10", point_alpha = 1, point_size = 0.5, text_size = 3)
+plotUMAP(sce, colour_by = "manual_ann", text_by = "manual_ann", point_alpha = 1, point_size = 0.5, text_size = 3) + scale_color_manual(values = colors)
+dev.off()
+
+pdf(here(dir, clusterdir, "Tsk_colon.UMAP_TSNE.annotated_granular_clusters.pdf"), width = 10)
+plotUMAP(sce, colour_by = "manual_ann", text_by = "manual_ann", point_alpha = 1, point_size = 0.5, text_size = 3) + scale_color_manual(values = colors)
+plotTSNE(sce, colour_by = "manual_ann", text_by = "manual_ann", point_alpha = 1, point_size = 0.5, text_size = 3) + scale_color_manual(values = colors)
+dev.off()
+```
+
+#Remove Doublets
+```{r}
+sce.dbl <- sce
+sce <- sce.dbl[,sce.dbl$scDblFinder.class == "singlet"]
+#sce <- sce[,-which(sce$tsk.c.cluster.k10 %in% c("12"))] #doublets clusters
+sce$tsk.c.cluster.k10 <- droplevels(sce$tsk.c.cluster.k10)
+```
+
+
+```{r}
+rmarkdown::render("/data/users/sushmanagaraj/projects/singlecell/TGFb_signaling/analysis/src/TGFb_signaling/Tsk_colon/troubleshooting_DE_analysis.Rmd", output_format = "html_document", output_file = "/data/users/sushmanagaraj/projects/singlecell/TGFb_signaling/analysis/Tsk_colon/differential_expression_analysis/troubleshooting_DE_analysis.Smooth_muscle.html", output_dir = "/data/users/sushmanagaraj/projects/singlecell/TGFb_signaling/analysis/Tsk_colon/differential_expression_analysis/")
+
+```
+
+#Differential Abundance analysis
+```{r}
+library(edgeR)
+
+#DA analysis using all cell type labels
+abundances <- table(sce$manual_ann, sce$sample)
+level <- "cluster"
+#level <- "cell_type"
+comparison <- "heterozygous-vs-wildtype"
+abundances <- unclass(abundances) 
+head(abundances)
+
+extra.info <- colData(sce)[match(colnames(abundances), sce$sample), c("sample", "transgenic.line", "gender", "genotype", "tissue", "prep.date", "dad", "mums", "DOB", "cage")]
+rownames(extra.info) <- extra.info$sample
+y.ab <- DGEList(abundances, samples=extra.info)
+y.ab
+gender <- "pooled"
+
+keep <- filterByExpr(y.ab, group=y.ab$samples$genotype)
+summary(keep)
+y.ab <- y.ab[keep,]
+
+#Genotype comparison
+group <- factor(y.ab$samples$genotype)
+group <- relevel(group, ref = "Wildtype")
+design <- model.matrix(~y.ab$samples$gender + group) #Adjusting for gender
+#design <- model.matrix(~group)
+rownames(design) <- colnames(y.ab)
+design
+
+#EdgeR
+y.ab <- estimateDisp(y.ab, design, trend="none")
+summary(y.ab$common.dispersion)
+plotBCV(y.ab, cex=1)
+
+fit.ab <- glmQLFit(y.ab, design, robust=TRUE, abundance.trend=FALSE)
+summary(fit.ab$var.prior)
+summary(fit.ab$df.prior)
+
+plotQLDisp(fit.ab, cex=1)
+
+res <- glmQLFTest(fit.ab, coef = ncol(design))
+summary(decideTests(res))
+result <- topTags(res, n = Inf)
+
+y.ab2 <- calcNormFactors(y.ab)
+y.ab2$samples$norm.factors
+y.ab2 <- estimateDisp(y.ab2, design, trend="none")
+fit.ab2 <- glmQLFit(y.ab2, design, robust=TRUE, abundance.trend=FALSE)
+res2 <- glmQLFTest(fit.ab2, coef=ncol(design))
+result2 <- topTags(res2, n = Inf)
+
+
+write.csv(result2, file = here(dir, "differential_abundance_analysis", paste("differential_abundance", comparison, gender, level, "csv", sep = ".")))
+
+#DA analysis using only Fibroblasts
+keep <- rownames(y.ab)[grep("Fibroblast", rownames(y.ab))]
+y.ab3 <- y.ab[keep,, keep.lib.sizes = FALSE]
+y.ab3 <- estimateDisp(y.ab3, design, trend="none")
+fit.ab3 <- glmQLFit(y.ab3, design, robust=TRUE, abundance.trend=FALSE)
+res3 <- glmQLFTest(fit.ab3, coef=ncol(design))
+topTags(res3, n=10)
+```
+
+#Enrichment of GWAS genes in NMF patterns.
+```{r}
+gwas <- read.table(file = here("data", "GWAS_genes.txt"), header = TRUE)
+result.50 <- readRDS(here(dir, "cogaps", "result.50.rds"))
+patt <- result.50@featureLoadings
+npatt <- 50
+mypatt <- paste0("Pattern_", c(1:npatt))
+genes_by_patt <- lapply(mypatt, function(x) {
+  patt1 <- patt[,x]
+  names(patt1) <- row.names(patt)
+  ord <- order(patt1, decreasing = TRUE)
+  patt.ord <- patt1[ord]
+})
+
+names(genes_by_patt) <- mypatt
+
+m <- sum(gwas$V1 %in% rownames(patt)) #white balls (successes) in urn
+n <- nrow(patt) - m #Black balls in urn
+k <- 500 #number of balls drawn from the urn
+
+lapply(genes_by_patt, function(x) {
+  top500 <- x[1:500]
+  q <- sum(gwas$V1 %in% names(top500))
+  phyper(q, m, n, k, lower.tail = TRUE, log.p = FALSE)
+})
+```
+
+
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+source("/home/sushmanagaraj/src/devel/R/SingleCell/functions/functions.R")
+gwas <- read.table(file = here("data", "GWAS_genes.txt"), header = TRUE)
+
+sce.colon$manual_ann <- factor(sce.colon$manual_ann)
+sce.het <- sce.colon[,sce.colon$genotype == "heterozygous"]
+sce.wt <- sce.colon[,sce.colon$genotype == "Wildtype"]
+
+get_scaled_mat <- function(sce) {
+  avgs <- vector("list", length = length(levels(sce$manual_ann)))
+  avgs <- lapply(levels(sce$manual_ann), function(x) {clustAvg(x, sce, "manual_ann")})
+  merged <- Reduce(function(x, y) merge(x, y, all = TRUE, by = "gene"), avgs)
+  rownames(merged) <- merged$gene
+  mat <- merged[rownames(merged) %in% gwas$Gene, grep("Avg", colnames(merged))]
+  #mat <- mat[genes, ]
+  colnames(mat) <- gsub("Avg.", "", colnames(mat))
+  mat <- as.matrix(mat)
+  mat <- log2(mat + 1)
+  scaled_mat <- t(scale(t(mat)))
+  return(scaled_mat)
+}
+
+mat.het <- get_scaled_mat(sce.het)
+mat.wt <- get_scaled_mat(sce.wt)
+
+mat.het <- mat.het[-which(rownames(mat.het) == "Gsdma2"), ]
+mat.het <- mat.het[, -which(colnames(mat.het) == "Neurons")]
+#cols <- c('#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231', '#911eb4', '#46f0f0', '#f032e6', '#bcf60c', '#fabebe', '#008080', '#e6beff', '#9a6324', '#046c9a', '#800000', '#cc3a1b', '#808000', '#4cabdc', '#808080', '#000075', '#ebcb2e', '#00ccff', "#ebcb2e", "#9ec22f", "#a9961b", "#cc8778", "#E69F00", "#56B4E9")
+#names(cols) <- levels(sce.het$manual_ann)
+#column_ha <- HeatmapAnnotation(clusters = colnames(mat), col = list(clusters = cols))
+
+pdf(here(dir, "plots_for_select_genes", "Tsk_colon.Hets.Risk_genes.pdf"), height = 9)
+#Heatmap(mat, name = "log2(Avg.norm.expr)", col = colorRamp2(c(0, 1.5, 3), c("blue", "white", "red")), cluster_columns = FALSE, cluster_rows = FALSE, top_annotation = column_ha, column_split = rep(c(1 ,2), c(4, 4)), column_gap = unit(10, "mm"), column_title = "Macrophage Clusters")
+ht1 <- Heatmap(t(mat.het), name = "Z-score(log2(Avg.norm.expr))", cluster_columns = FALSE, cluster_rows = FALSE)
+dev.off()
+```
+
+
+```{r save/load}
+dir <- "Tsk_colon"
+saveRDS(sce, here(dir, "sce.Tsk_colon.intermediate.all_genes.rds"))
+
+saveRDS(sce, here(dir, "sce.Tsk_colon.intermediate.rds"))
+sce <- readRDS(here(dir, "sce.Tsk_colon.intermediate.rds"))
+
+saveRDS(sce, here(dir, "sce.Tsk_colon.final.rds"))
+sce.c <- readRDS(here(dir, "sce.Tsk_colon.final.rds"))
+```
+

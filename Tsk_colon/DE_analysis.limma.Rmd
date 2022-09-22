@@ -1,0 +1,474 @@
+---
+title: "Tsk Colon DE analysis"
+author: "Sushma Nagaraj"
+date: "6/30/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+suppressPackageStartupMessages({ 
+  library(scater)
+  library(scran)
+  library(cowplot)
+  library(stringr)
+  library(edgeR)
+  library(limma)
+  library(PCAtools)
+  library(factoextra)
+  library(muscat)
+  library(dplyr)
+  library(here)
+  })
+```
+
+```{r}
+dir <- "Tsk_colon"
+sce.full <- readRDS(here(dir, "sce.Tsk_colon.final.rds"))
+
+#Males
+sce.colon <- sce.full
+sce.full <- sce.full[,sce.full$gender == "M"]
+```
+
+```{r}
+#geneqc <- perFeatureQCMetrics(sce, exprs_values = "counts")
+#rowData(sce) <- cbind(rowData(sce), geneqc)
+genes_expr <- nexprs(sce.full, byrow = TRUE)
+sce <- sce.full[genes_expr > 0, ] #Remove genes not expressed at all by any cell 
+coldata <- data.frame(sample = sce$sample, gender = sce$gender, genotype = sce$genotype, manual_ann = sce$manual_ann)
+rownames(coldata) <- rownames(colData(sce))
+sce.new <- SingleCellExperiment(assays = list(counts = counts(sce)), colData = coldata)
+sce.new <- prepSCE(sce.new, kid = "manual_ann", sid = "sample", gid = "genotype")
+
+nk <- length(kids <- levels(sce.new$cluster_id))
+ns <- length(sids <- levels(sce.new$sample_id))
+names(kids) <- kids; names(sids) <- sids
+
+t(table(sce.new$cluster_id, sce.new$sample_id))
+
+sce.new <- sce.new[,!sce.new$cluster_id %in% c("Bcells 1", "Bcells 2", "Epithelial like cells", "Fibroblast 9", "Macrophage 7")]
+sce.new$cluster_id <- droplevels(sce.new$cluster_id)
+sce.new$group_id <- relevel(sce.new$group_id, ref = "Wildtype")
+
+pb <- aggregateData(sce.new, assay = "counts", fun = "sum", by = c("cluster_id", "sample_id"))
+assayNames(pb)
+mm <- model.matrix(~gender + group_id, data = colData(pb))
+rownames(mm) <- rownames(colData(pb))
+```
+
+#MDS plot
+```{r}
+pb_mds <- pbMDS(pb)
+#pdf(here(dir, "differential_expression_analysis", "muscat_mds_plot.pdf"), width = 10)
+pdf(here(dir, "differential_expression_analysis", "cluster_level_DE_analysis_males", "muscat_mds_plot.pdf"), width = 10)
+print(pb_mds)
+dev.off()
+
+```
+
+#Limma voom with quality weights
+```{r, echo=TRUE}
+pb.copy <- pb
+assay(pb.copy, "Neurons") <- NULL #Remove neurons as there are a handful total and a couple of samples have none.
+DE_tbl <- vector("list", length(assayNames(pb.copy)))
+
+
+DE_tbl <- lapply(seq_along(assayNames(pb.copy)), function(x){
+  summed <- assay(pb.copy, x)
+  y <- DGEList(summed, samples=colData(pb.copy))
+  
+  keep <- filterByExpr(y, group="group_id")
+  summary(keep)
+  y <- y[keep, , keep.lib.sizes=FALSE]
+  y <- calcNormFactors(y)
+  y$samples
+
+  #pdf(here(dir, "differential_expression_analysis", paste0("plots.", assayNames(pb.copy)[x], ".pdf")))
+  #pdf(here(dir, "differential_expression_analysis", "cluster_level_DE_analysis_males", paste0("plots.", assayNames(pb.copy)[x], ".pdf")))
+  for (i in seq_len(ncol(y))) {
+    plotMD(y, column=i)
+  }
+  pca <- prcomp(t(cpm(y, log = TRUE)))
+  print(fviz_pca_ind(pca, habillage = y$samples$group_id, repel = TRUE))
+  plotMDS(y, col=as.numeric(y$samples$group_id == "Wildtype") + 1)
+  #Add gender as a covariate
+  design <- model.matrix(~gender + group, data = y$samples) #Combined
+  #design <- model.matrix(~group, data = y$samples) #Males only
+  design
+  v <- voomWithQualityWeights(y, design, plot = TRUE)
+  fit <- lmFit(v)
+  fit <- eBayes(fit, robust = TRUE)
+  res <- topTable(fit, coef = 3, sort.by="p", n=Inf) #Combined
+  #res <- topTable(fit, coef = 2, sort.by="p", n=Inf) #Males only
+  hist(res$P.Value)
+  #dev.off()
+  
+  res$cluster_id <- assayNames(pb.copy)[x]
+  res$group_id <- "heterozygous"
+  #write.csv(res, file = here(dir, "differential_expression_analysis", "cluster_level_DE_analysis_males", paste0("DE_analysis.", assayNames(pb.copy)[x], ".csv")))
+  return(res)
+})
+
+names(DE_tbl) <- assayNames(pb.copy)
+
+tbl_fil <- lapply(DE_tbl, function(u) {
+  u$gene <- rownames(u)
+  rownames(u) <- NULL
+  u <- u[u$adj.P.Val < 0.1 & abs(u$logFC) > 0.5, ]
+})
+
+n_de <- vapply(tbl_fil, nrow, numeric(1))
+n_de
+
+DE_genes <- do.call(rbind, tbl_fil)
+write.csv(DE_genes, file = here(dir, "differential_expression_analysis", "cluster_level_DE_analysis_males", paste0("DE_analysis.padj_lt_0.1.csv")))
+
+#frq <- calcExprFreqs(sce.new, assay = "counts", th = 0)
+
+sce$gender.genotype <- paste0(sce$gender, ".", sce$genotype)
+#pdf(here(dir, "differential_expression_analysis", "DE_genes.violin_plots.pdf"))
+lapply(seq_along(tbl_fil), function(x){
+  if(nrow(tbl_fil[[x]]) > 0) {
+    pdf(here(dir, "differential_expression_analysis", "cluster_level_DE_analysis_males", paste0(names(tbl_fil)[x], ".DE_genes.violin_plots.pdf")), height = 50, width = 10)
+    print(plotExpression(sce[,sce$manual_ann == names(tbl_fil)[x]], features = tbl_fil[[x]]$gene, x = I(as.factor(sce$gender.genotype[sce$manual_ann == names(tbl_fil)[x]])), col = I(as.factor(sce$sample[sce$manual_ann == names(tbl_fil)[x]]))) + theme(axis.text.x = element_text(angle = 90)) + ggtitle(names(tbl_fil)[x]))
+    dev.off()
+  }
+})
+#dev.off()
+
+pdf(here(dir, "differential_expression_analysis", "cluster_level_DE_analysis_males", "Fibroblast 1.DE_genes.violin_plots.pdf"), height = 80, width = 10)
+plotExpression(sce[,sce$manual_ann == "Fibroblast 1"], features = tbl_fil$`Fibroblast 1`$gene, x = I(as.factor(sce$gender.genotype[sce$manual_ann == "Fibroblast 1"])), col = I(as.factor(sce$sample[sce$manual_ann == "Fibroblast 1"]))) + theme(axis.text.x = element_text(angle = 90)) + ggtitle("Fibroblast 1")
+dev.off()
+
+pdf(here(dir, "differential_expression_analysis", "cluster_level_DE_analysis_males", "ICC 2.DE_genes.violin_plots.pdf"), height = 80, width = 10)
+plotExpression(sce[,sce$manual_ann == "ICC 2"], features = tbl_fil$`ICC 2`$gene, x = I(as.factor(sce$gender.genotype[sce$manual_ann == "ICC 2"])), col = I(as.factor(sce$sample[sce$manual_ann == "ICC 2"]))) + theme(axis.text.x = element_text(angle = 90)) + ggtitle("ICC 2")
+dev.off()
+
+#plotExpression(sce[,sce$manual_ann == "Penk+Fibroblasts"], features = "Tnxb", x = I(as.factor(sce$gender.genotype[sce$manual_ann == "Penk+Fibroblasts"])), col = I(as.factor(sce$sample[sce$manual_ann == "Penk+Fibroblasts"]))) + theme(axis.text.x = element_text(angle = 90)) + ggtitle("Penk+Fibroblasts")
+```
+
+```{r}
+plotExpression(sce[,sce$manual_ann == "Fibroblast 4"], features = c("Kcnn3"), x = I(as.factor(sce$genotype[sce$manual_ann == "Fibroblast 4"])), col = I(as.factor(sce$sample[sce$manual_ann == "Fibroblast 4"]))) + theme(axis.text.x = element_text(angle = 90)) + ggtitle("Fibroblast 4, Males and females combined")
+
+sce.m <- sce[, sce$gender == "M"]
+plotExpression(sce.m[,sce.m$manual_ann == "Fibroblast 3"], features = c("Kcnn3"), x = I(as.factor(sce.m$genotype[sce.m$manual_ann == "Fibroblast 3"])), col = I(as.factor(sce.m$sample[sce.m$manual_ann == "Fibroblast 3"]))) + theme(axis.text.x = element_text(angle = 90)) + ggtitle("Fibroblast 3, Males only")
+
+sce.f <- 
+```
+#Add fraction of cells expressing gene.
+```{r}
+source("~/src/devel/R/SingleCell/functions/functions.R")
+sce.het <- sce[,sce$genotype == "heterozygous"]
+sce.wt <- sce[,sce$genotype == "Wildtype"]
+
+clsize.het <- unclass(table(sce.het$manual_ann))
+clsize.wt <- unclass(table(sce.wt$manual_ann))
+
+for(i in 1:length(tbl_fil)) {
+  nc.het <- clustAvg(names(tbl_fil)[i], sce.het, "manual_ann")
+  nc.het <- nc.het[rownames(nc.het) %in% tbl_fil[[i]]$gene, ]
+  nc.het <- nc.het[tbl_fil[[i]]$gene, ]
+  nc.het$fraction.cells.expressing.gene <- nc.het[,2]/clsize.het[names(tbl_fil)[i]]
+  colnames(nc.het) <- paste0(colnames(nc.het) , ".Het")
+  all(rownames(nc.het) == tbl_fil[[i]]$gene)
+  tbl_fil[[i]]$fraction.cells.expressing.gene.Het <- nc.het$fraction.cells.expressing.gene.Het
+
+  nc.wt <- clustAvg(names(tbl_fil)[i], sce.wt, "manual_ann")
+  nc.wt <- nc.wt[rownames(nc.wt) %in% tbl_fil[[i]]$gene, ]
+  nc.wt <- nc.wt[tbl_fil[[i]]$gene, ]
+  nc.wt$fraction.cells.expressing.gene <- nc.wt[,2]/clsize.wt[names(tbl_fil)[i]]
+  colnames(nc.wt) <- paste0(colnames(nc.wt) , ".Wt")
+  all(rownames(nc.wt) == tbl_fil[[i]]$gene)
+  tbl_fil[[i]]$fraction.cells.expressing.gene.Wt <- nc.wt$fraction.cells.expressing.gene.Wt
+  
+  tbl_fil[[i]]$fraction.cells.expressing.gene <- (nc.het[,2] + nc.wt[,2]) / (clsize.het[names(tbl_fil)[i]] + clsize.wt[names(tbl_fil)[i]])
+}
+
+DE_genes2 <- do.call(rbind, tbl_fil)
+write.csv(DE_genes2, file = here(dir, "differential_expression_analysis", "cluster_level_DE_analysis", paste0("DE_analysis.padj_lt_0.1.fraction_cells_added.csv")))
+
+```
+
+#Add annotation
+```{r}
+#group <- "cluster_level_DE_analysis_males"
+group <- "cluster_level_DE_analysis"
+DE_genes2 <- read.csv(file = here(dir, "differential_expression_analysis", group, "DE_analysis.padj_lt_0.1.fraction_cells_added.csv"), header = TRUE, row.names = 1)
+
+library(biomaRt)
+ensembl = useEnsembl(biomart="ensembl", dataset="mmusculus_gene_ensembl")
+genedesc <- getBM(attributes=c('external_gene_name','description'), filters = 'external_gene_name', values = DE_genes2$gene, mart =ensembl)
+DE_genes2$description <- genedesc[match(DE_genes2$gene, genedesc$external_gene_name), "description"]
+
+gwas <- read.table(file = here("data", "GWAS_genes.txt"), header = TRUE)
+DE_genes2$Risk_genes <- gwas[match(DE_genes2$gene, gwas$Gene), "Source"]
+de_gwas <- DE_genes2[! is.na(DE_genes2$Risk_genes), ]
+pdf(here(dir, "differential_expression_analysis", group, "DE_Risk_genes.pdf"))
+ggplot(de_gwas, aes(x = gene, y = cluster_id)) + geom_point(shape = 21, aes(size =  fraction.cells.expressing.gene, fill = logFC), show.legend = TRUE) + scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, guide = "colourbar", aesthetics = "fill") + theme_bw() + ggtitle("Risk genes associated with Systemic Sclerosis, DE adj.P,Val < 0.1") + theme(axis.text.x = element_text(angle = 90))
+dev.off()
+
+scleroderma <- read.table(here("data", "DE_genes_in_scleroderma.txt"), header = TRUE, sep = "\t")
+DE_genes2$DE_in_Scleroderma <- scleroderma[match(DE_genes2$gene, scleroderma$Gene), "Change.in.scleroderma"]
+de_scleroderma <- DE_genes2[! is.na(DE_genes2$DE_in_Scleroderma), ]
+pdf(here(dir, "differential_expression_analysis", group, "DE_genes_in_scleroderma.pdf"))
+ggplot(de_scleroderma, aes(x = gene, y = cluster_id)) + geom_point(shape = 21, aes(size =  fraction.cells.expressing.gene, fill = logFC), show.legend = TRUE) + scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, guide = "colourbar", aesthetics = "fill") + theme_bw() + ggtitle("DE genes in scleroderma skin biopsies") + theme(axis.text.x = element_text(angle = 90))
+dev.off()
+
+subsets_in_sc <- read.table(here("data", "subsets_of_scleroderma.genes.txt"), header = TRUE, sep = "\t")
+DE_genes2$subsets_of_scleroderma <- subsets_in_sc[match(DE_genes2$gene, subsets_in_sc$Gene), "Biological.theme"]
+subsets <- DE_genes2[! is.na(DE_genes2$subsets_of_scleroderma), ]
+#pdf(here(dir, "differential_expression_analysis", group, "scleroderma_subsets.pdf"), width = 13)
+pdf(here(dir, "differential_expression_analysis", group, "scleroderma_subsets.pdf"))
+ggplot(subsets, aes(x = gene, y = cluster_id)) + geom_point(shape = 21, aes(size =  fraction.cells.expressing.gene, fill = logFC), show.legend = TRUE) + scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, guide = "colourbar", aesthetics = "fill") + facet_wrap(~subsets_of_scleroderma) + theme_bw() + ggtitle("Genes defining Scleroderma subsets & corresponding biological themes") + theme(axis.text.x = element_text(angle = 90))
+dev.off()
+
+library(msigdbr)
+h_gene_sets = msigdbr(species = "mouse", category = "H")
+msigdbr_list = split(x = h_gene_sets$gene_symbol, f = h_gene_sets$gs_name)
+
+DE_genes2$HALLMARK_INTERFERON_GAMMA_RESPONSE <- ifelse(DE_genes2$gene %in% msigdbr_list$HALLMARK_INTERFERON_GAMMA_RESPONSE, TRUE, NA)
+ifng <- DE_genes2[! is.na(DE_genes2$HALLMARK_INTERFERON_GAMMA_RESPONSE), ]
+ggplot(ifng, aes(x = gene, y = cluster_id)) + geom_point(shape = 21, aes(size =  fraction.cells.expressing.gene, fill = logFC), show.legend = TRUE) + scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, guide = "colourbar", aesthetics = "fill") + theme_bw() + ggtitle("Hallmark Interferon Gamma Response genes") + theme(axis.text.x = element_text(angle = 90))
+
+DE_genes2$HALLMARK_INTERFERON_ALPHA_RESPONSE <- ifelse(DE_genes2$gene %in% msigdbr_list$HALLMARK_INTERFERON_ALPHA_RESPONSE, TRUE, NA)
+ifna <- DE_genes2[! is.na(DE_genes2$HALLMARK_INTERFERON_ALPHA_RESPONSE), ]
+ggplot(ifna, aes(x = gene, y = cluster_id)) + geom_point(shape = 21, aes(size =  fraction.cells.expressing.gene, fill = logFC), show.legend = TRUE) + scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, guide = "colourbar", aesthetics = "fill") + theme_bw() + ggtitle("Hallmark Interferon Alpha Response genes") + theme(axis.text.x = element_text(angle = 90))
+
+DE_genes2$HALLMARK_INFLAMMATORY_RESPONSE <- ifelse(DE_genes2$gene %in% msigdbr_list$HALLMARK_INFLAMMATORY_RESPONSE, TRUE, NA)
+infl <- DE_genes2[! is.na(DE_genes2$HALLMARK_INFLAMMATORY_RESPONSE), ]
+ggplot(infl, aes(x = gene, y = cluster_id)) + geom_point(shape = 21, aes(size =  fraction.cells.expressing.gene, fill = logFC), show.legend = TRUE) + scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, guide = "colourbar", aesthetics = "fill") + theme_bw() + ggtitle("Hallmark Inflammatory Response genes") + theme(axis.text.x = element_text(angle = 90))
+
+DE_genes2$HALLMARK_TGF_BETA_SIGNALING <- ifelse(DE_genes2$gene %in% msigdbr_list$HALLMARK_TGF_BETA_SIGNALING, TRUE, NA)
+tgfb <- DE_genes2[! is.na(DE_genes2$HALLMARK_TGF_BETA_SIGNALING), ]
+ggplot(tgfb, aes(x = gene, y = cluster_id)) + geom_point(shape = 21, aes(size =  fraction.cells.expressing.gene, fill = logFC), show.legend = TRUE) + scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, guide = "colourbar", aesthetics = "fill") + theme_bw() + ggtitle("Hallmark TGF Beta signaling genes") + theme(axis.text.x = element_text(angle = 90))
+
+DE_genes2$HALLMARK_IL6_JAK_STAT3_SIGNALING <- ifelse(DE_genes2$gene %in% msigdbr_list$HALLMARK_IL6_JAK_STAT3_SIGNALING, TRUE, NA)
+jakstat <- DE_genes2[! is.na(DE_genes2$HALLMARK_IL6_JAK_STAT3_SIGNALING), ]
+ggplot(jakstat, aes(x = gene, y = cluster_id)) + geom_point(shape = 21, aes(size =  fraction.cells.expressing.gene, fill = logFC), show.legend = TRUE) + scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, guide = "colourbar", aesthetics = "fill") + theme_bw() + ggtitle("Hallmark Il6 Jak Stat signaling genes") + theme(axis.text.x = element_text(angle = 90))
+
+pdf(here(dir, "differential_expression_analysis", group, "hallmark_pathways.pdf"), width = 13)
+print(ggplot(ifng, aes(x = gene, y = cluster_id)) + geom_point(shape = 21, aes(size =  fraction.cells.expressing.gene, fill = logFC), show.legend = TRUE) + scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, guide = "colourbar", aesthetics = "fill") + theme_bw() + ggtitle("Hallmark Interferon Gamma Response genes") + theme(axis.text.x = element_text(angle = 90)))
+print(ggplot(ifna, aes(x = gene, y = cluster_id)) + geom_point(shape = 21, aes(size =  fraction.cells.expressing.gene, fill = logFC), show.legend = TRUE) + scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, guide = "colourbar", aesthetics = "fill") + theme_bw() + ggtitle("Hallmark Interferon Alpha Response genes") + theme(axis.text.x = element_text(angle = 90)))
+print(ggplot(infl, aes(x = gene, y = cluster_id)) + geom_point(shape = 21, aes(size =  fraction.cells.expressing.gene, fill = logFC), show.legend = TRUE) + scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, guide = "colourbar", aesthetics = "fill") + theme_bw() + ggtitle("Hallmark Inflammatory Response genes") + theme(axis.text.x = element_text(angle = 90)))
+print(ggplot(tgfb, aes(x = gene, y = cluster_id)) + geom_point(shape = 21, aes(size =  fraction.cells.expressing.gene, fill = logFC), show.legend = TRUE) + scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, guide = "colourbar", aesthetics = "fill") + theme_bw() + ggtitle("Hallmark TGF Beta signaling genes") + theme(axis.text.x = element_text(angle = 90)))
+dev.off()
+
+pdf(here(dir, "differential_expression_analysis", group, "hallmark_pathways.IL6_JAK_STAT3.pdf"), width = 13)
+ggplot(jakstat, aes(x = gene, y = cluster_id)) + geom_point(shape = 21, aes(size =  fraction.cells.expressing.gene, fill = logFC), show.legend = TRUE) + scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, guide = "colourbar", aesthetics = "fill") + theme_bw() + ggtitle("Hallmark Il6 Jak Stat signaling genes") + theme(axis.text.x = element_text(angle = 90))
+dev.off()
+
+write.csv(DE_genes2, file = here(dir, "differential_expression_analysis", group, "DE_analysis.padj_lt_0.1.fraction_cells_added.csv"))
+```
+
+#GSEA Analysis
+```{r}
+library(fgsea)
+library(data.table)
+library(gridExtra)
+
+res <- DE_tbl$`Fibroblast 6`
+library(biomaRt)
+human = useMart("ensembl", dataset = "hsapiens_gene_ensembl", host = "useast.ensembl.org")
+mouse = useMart("ensembl", dataset = "mmusculus_gene_ensembl", host = "useast.ensembl.org")
+
+hres <- vector("list", length(DE_tbl))
+hres <- lapply(DE_tbl, function(res){
+  genesV2 = getLDS(attributes = c("mgi_symbol"), filters = "mgi_symbol", values = rownames(res), mart = mouse, attributesL = c("hgnc_symbol"), martL = human, uniqueRows=T)
+  genesV2 <- genesV2[!duplicated(genesV2$MGI.symbol), ]
+  res$human <- genesV2[match(rownames(res), genesV2$MGI.symbol), "HGNC.symbol"]
+  temp <- res[,c("human", "t")]
+  temp <- temp[!is.na(temp$human), ]
+  temp <- temp[!duplicated(temp$human), ]
+  table(is.na(temp$t))
+  ranks <- temp$t
+  names(ranks) <- temp$human
+
+  pathways.hallmark <- gmtPathways("/data/users/sushmanagaraj/ref/MSigDB/h.all.v7.2.symbols.gmt")
+  fgseaRes <- fgsea(pathways=pathways.hallmark, stats=ranks, eps=0)
+  fgseaRestidy <- fgseaRes[order(fgseaRes$NES, decreasing = TRUE), ]
+  pdf(here(dir, "differential_expression_analysis", "cluster_level_DE_analysis_males", "fgsea", paste0("fgsea_analysis_plots.hallmark_pathways.", res$cluster_id[1], ".pdf")))
+  print(ggplot(fgseaRestidy, aes(reorder(pathway, NES), NES)) + geom_col(aes(fill=padj<0.05)) + coord_flip() + labs(x="Pathway", y="Normalized Enrichment Score", title="Hallmark pathways NES from GSEA") + theme_minimal())
+  dev.off()
+
+  topHallmarkPathwaysUp <- fgseaRes[ES > 0][head(order(pval), n=10), pathway]
+  topHallmarkPathwaysDown <- fgseaRes[ES < 0][head(order(pval), n=10), pathway]
+  topHallmarkPathways <- c(topHallmarkPathwaysUp, rev(topHallmarkPathwaysDown))
+  pdf(here(dir, "differential_expression_analysis", "cluster_level_DE_analysis_males", "fgsea", paste0("fgsea_gseatable.hallmark_pathways.", res$cluster_id[1], ".pdf")), width = 15)
+  plotGseaTable(pathways.hallmark[topHallmarkPathways], ranks, fgseaRes, gseaParam=0.5)
+  dev.off()
+
+  fwrite(fgseaRestidy[fgseaRestidy$padj < 0.1, ], file=here(dir, "differential_expression_analysis", "cluster_level_DE_analysis_males", "fgsea",  paste0("fgsea_analysis.hallmark_pathways.", res$cluster_id[1], ".txt")), sep="\t", sep2=c("", " ", ""))
+  
+  return(fgseaRestidy)
+})
+names(hres) <- names(DE_tbl)
+for(i in 1:length(hres)){
+  hres[[i]]$cluster <- names(hres)[i]
+}
+hres.dat <- do.call("rbind", hres)
+#fwrite(hres.dat, file=here(dir, "differential_expression_analysis", paste0("fgsea_analysis.hallmark_pathways.all_clusters.txt")), sep="\t", sep2=c("", " ", ""))
+fwrite(hres.dat, file=here(dir, "differential_expression_analysis", "cluster_level_DE_analysis_males", "fgsea",  paste0("fgsea_analysis.hallmark_pathways.all_clusters.txt")), sep="\t", sep2=c("", " ", ""))
+fwrite(hres.dat[hres.dat$padj < 0.1, ], file=here(dir, "differential_expression_analysis", "cluster_level_DE_analysis_males", "fgsea",  paste0("fgsea_analysis.hallmark_pathways.all_clusters.padj_lt_0.1.txt")), sep="\t", sep2=c("", " ", ""))
+
+keggres <- vector("list", length(DE_tbl))
+keggres <- lapply(DE_tbl, function(res){
+  genesV2 = getLDS(attributes = c("mgi_symbol"), filters = "mgi_symbol", values = rownames(res), mart = mouse, attributesL = c("hgnc_symbol"), martL = human, uniqueRows=T)
+  genesV2 <- genesV2[!duplicated(genesV2$MGI.symbol), ]
+  res$human <- genesV2[match(rownames(res), genesV2$MGI.symbol), "HGNC.symbol"]
+  temp <- res[,c("human", "t")]
+  temp <- temp[!is.na(temp$human), ]
+  temp <- temp[!duplicated(temp$human), ]
+  table(is.na(temp$t))
+  ranks <- temp$t
+  names(ranks) <- temp$human
+  
+  pathways.kegg <- gmtPathways("/data/users/sushmanagaraj/ref/MSigDB/c2.cp.kegg.v7.2.symbols.gmt")
+  keggRes <- fgsea(pathways = pathways.kegg, ranks, eps=0)
+  keggRestidy <-  keggRes[order(keggRes$NES, decreasing = TRUE), ]
+  pdf(here(dir, "differential_expression_analysis", "cluster_level_DE_analysis_males", "fgsea", paste0("fgsea_analysis_plots.kegg_pathways.", res$cluster_id[1], ".pdf")), height = 20, width = 10)
+  print(ggplot(keggRestidy, aes(reorder(pathway, NES), NES)) + geom_col(aes(fill=padj<0.05)) + coord_flip() + labs(x="Pathway", y="Normalized Enrichment Score", title="Kegg pathways NES from GSEA") + theme_minimal())
+  dev.off()
+
+  topPathwaysUp <- keggRes[ES > 0][head(order(pval), n=10), pathway]
+  topPathwaysDown <- keggRes[ES < 0][head(order(pval), n=10), pathway]
+  topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+  pdf(here(dir, "differential_expression_analysis", "cluster_level_DE_analysis_males", "fgsea", paste0("fgsea_gseatable.kegg_pathways.", res$cluster_id[1], ".pdf")), width = 15)
+  plotGseaTable(pathways.kegg[topPathways], ranks, keggRes, gseaParam=0.5)
+  dev.off()
+
+  fwrite(keggRestidy[keggRestidy$padj < 0.1, ], file=here(dir, "differential_expression_analysis", "cluster_level_DE_analysis_males", "fgsea",  paste0("fgsea_analysis.kegg_pathways.", res$cluster_id[1], ".txt")), sep="\t", sep2=c("", " ", ""))
+  
+  return(keggRestidy)
+})
+names(keggres) <- names(DE_tbl)
+for(i in 1:length(keggres)){
+  keggres[[i]]$cluster <- names(keggres)[i]
+}
+keggres.dat <- do.call("rbind", keggres)
+fwrite(keggres.dat, file=here(dir, "differential_expression_analysis", "cluster_level_DE_analysis_males", "fgsea",  paste0("fgsea_analysis.kegg_pathways.all_clusters.txt")), sep="\t", sep2=c("", " ", ""))
+fwrite(keggres.dat[keggres.dat$padj < 0.1, ], file=here(dir, "differential_expression_analysis", "cluster_level_DE_analysis_males", "fgsea",  paste0("fgsea_analysis.kegg_pathways.all_clusters.padj_lt_0.1.txt")), sep="\t", sep2=c("", " ", ""))
+
+#Plot
+library(reshape2)
+library(ComplexHeatmap)
+library(circlize)
+
+thresh <- 0.1
+#mydat <- hres.dat[,c("pathway", "padj", "NES", "cluster")]
+mydat <- keggres.dat[,c("pathway", "padj", "NES", "cluster")]
+mydat <- as.data.frame(mydat)
+mydat$NES[mydat$padj >= thresh] <- NA
+mydat_wide <- dcast(mydat, pathway ~ cluster, value.var = "NES")
+rownames(mydat_wide) <- mydat_wide$pathway
+mydat_wide <- mydat_wide[,-1]
+pdf(here(dir, "differential_expression_analysis", "cluster_level_DE_analysis_males", "fgsea", paste0("kegg_pathways.pdj_lt_", thresh, ".pdf")), height = 20)
+Heatmap(as.matrix(mydat_wide), name = "Norm ES", col = colorRamp2(c(-3.5, 0, 3.5), c("blue", "white", "red")), na_col = "grey", cluster_columns = FALSE, cluster_rows = FALSE, row_names_gp = grid::gpar(fontsize = 7))
+dev.off()
+```
+
+#GO analysis
+```{r,echo=FALSE,fig.height=10,fig.width=10}
+library(DOSE)
+library(clusterProfiler)
+#library(pathview)
+library(org.Mm.eg.db)
+
+keep_clust <- unlist(lapply(tbl_fil, nrow)) > 20
+tbl_fil_2 <- tbl_fil[keep_clust]
+for(i in 1:length(tbl_fil_2)) {
+  tbl_fil_2[[i]]$geneID <- rowData(sce.colon)[match(tbl_fil_2[[i]]$gene, rownames(rowData(sce.colon))), "gene_id_trimmed"]
+}
+goresup <- vector("list", length(tbl_fil_2))
+goresup <- lapply(tbl_fil_2, function(res){
+  sigOE_genes <- as.character(res$geneID[res$logFC > 0])
+  ego <- enrichGO(gene = sigOE_genes, 
+                  keyType = "ENSEMBL",
+                  OrgDb = org.Mm.eg.db, 
+                  ont = "ALL", 
+                  pAdjustMethod = "BH", 
+                  qvalueCutoff = 0.05, 
+                  readable = TRUE)
+
+  cluster_summary <- data.frame(ego)
+  if(nrow(cluster_summary) > 0) {
+    cluster_summary$cluster_id <- res$cluster_id[1]
+  }
+  set <- "up"
+  write.csv(cluster_summary, here(dir, "differential_expression_analysis", "cluster_level_DE_analysis_males", "GO_analysis", paste0("GO_analysis.", res$cluster_id[1], ".", set, ".csv")))
+#pdf(file.path("/data/users/sushmanagaraj/projects/rnaseq/IBS_GABA/analysis/Reanalysis_with_Salmon_quantification/IBS-vs-Control", group,  gender, paste0("GO_analysis_plots.", group, ".", gender, ".", set, ".pdf")), width = 15)
+#dotplot(ego, showCategory = 50)
+#x2 <- enrichplot::pairwise_termsim(ego) 
+#emapplot(x2)
+#dev.off()
+  return(cluster_summary)
+})
+go_up <- do.call(rbind, goresup)
+write.csv(go_up, file = here(dir, "differential_expression_analysis", "cluster_level_DE_analysis_males", "GO_analysis", "GO_analysis.upregulated_genes.csv"))
+
+goresdown <- vector("list", length(tbl_fil_2))
+goresdown <- lapply(tbl_fil_2, function(res){
+  sigOE_genes <- as.character(res$geneID[res$logFC < 0])
+  ego <- enrichGO(gene = sigOE_genes, 
+                  keyType = "ENSEMBL",
+                  OrgDb = org.Mm.eg.db, 
+                  ont = "ALL", 
+                  pAdjustMethod = "BH", 
+                  qvalueCutoff = 0.05, 
+                  readable = TRUE)
+
+  cluster_summary <- data.frame(ego)
+  if(nrow(cluster_summary) > 0) {
+    cluster_summary$cluster_id <- res$cluster_id[1]
+  }
+  set <- "down"
+  write.csv(cluster_summary, here(dir, "differential_expression_analysis", "cluster_level_DE_analysis_males", "GO_analysis", paste0("GO_analysis.", res$cluster_id[1], ".", set, ".csv")))
+#pdf(file.path("/data/users/sushmanagaraj/projects/rnaseq/IBS_GABA/analysis/Reanalysis_with_Salmon_quantification/IBS-vs-Control", group,  gender, paste0("GO_analysis_plots.", group, ".", gender, ".", set, ".pdf")), width = 15)
+#dotplot(ego, showCategory = 50)
+#x2 <- enrichplot::pairwise_termsim(ego) 
+#emapplot(x2)
+#dev.off()
+  return(cluster_summary)
+})
+go_down <- do.call(rbind, goresdown)
+write.csv(go_down, file = here(dir, "differential_expression_analysis", "cluster_level_DE_analysis_males", "GO_analysis", "GO_analysis.downregulated_genes.csv"))
+
+```
+
+
+
+```{r}
+library(msigdbr)
+library(ComplexHeatmap)
+library(circlize)
+
+geneSets = msigdbr(species = "mouse", category = "H")
+geneSets = msigdbr(species = "Mus musculus", category = "C2", subcategory = "CP:KEGG")
+m_list <- geneSets %>% split(x = .$gene_symbol, f = .$gs_name)
+
+cluster <- "Fibroblast 5"
+cluster <- "Smooth muscle cells"
+F5 <- assay(pb.copy, cluster)
+y <- DGEList(F5, samples=colData(pb.copy))
+keep <- filterByExpr(y, group="group_id")
+summary(keep)
+y <- y[keep, , keep.lib.sizes=FALSE]
+norm <- cpm(y, normalized.lib.sizes=FALSE)
+
+plot_genes(norm, m_list, "HALLMARK_TGF_BETA_SIGNALING", cluster)
+plot_genes(norm, m_list, "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION", cluster)
+plot_genes(norm, m_list, "KEGG_ECM_RECEPTOR_INTERACTION", cluster)
+plot_genes(norm, m_list, "KEGG_NEUROACTIVE_LIGAND_RECEPTOR_INTERACTION", cluster)
+
+column_ha <- HeatmapAnnotation(group = y$samples$group, col = list(group = c("heterozygous" = "#E41A1C", "Wildtype" = "#377EB8")))
+plot_genes <- function(mat, pathway, geneset_name, cluster) {
+  geneset <- m_list[[geneset_name]]
+  dat <- mat[rownames(mat) %in% geneset, ]
+  dat <- as.matrix(dat)
+  dat <- log2(dat + 1)
+  scaled_dat <- t(scale(t(dat)))
+  pdf(here(dir, "heatmaps", paste0("Heatmap.", geneset_name, ".", cluster, ".pdf")), height = 15, width = 10) #All samples in dataset
+  print(Heatmap(scaled_dat, name = "log2norm", col = colorRamp2(c(-2, 0, 2), c("blue", "white", "red")), top_annotation = column_ha, row_names_gp = grid::gpar(fontsize = 8), column_title = geneset_name))
+  dev.off()
+}
+```
